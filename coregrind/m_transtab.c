@@ -57,7 +57,7 @@
 
 /* Number of sectors the TC is divided into.  If you need a larger
    overall translation cache, increase this value. */
-#define N_SECTORS 8
+#define N_SECTORS 4
 
 /* Number of TC entries in each sector.  This needs to be a prime
    number to work properly, it must be <= 65535 (so that a TT index

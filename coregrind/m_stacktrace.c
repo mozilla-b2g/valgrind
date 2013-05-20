@@ -982,7 +982,7 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
       break;
    }
 
-   if (0/*DISABLED BY DEFAULT*/ && do_stack_scan && i < max_n_ips && i <= 2) {
+   if (1/*DISABLED BY DEFAULT*/ && do_stack_scan && i < max_n_ips && i <= 2) {
       Int  nByStackScan = 0;
       Addr lr = uregs.r14;
       Addr sp = uregs.r13 & ~3;
