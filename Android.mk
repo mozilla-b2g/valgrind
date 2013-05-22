@@ -34,11 +34,14 @@ common_cflags := \
 	-DVG_LIBDIR=\"/system/lib/valgrind\" \
 	-DANDROID_SYMBOLS_DIR=\"/data/local/symbols\"
 
+# Note: We will always need a directory that can resolve a "../../VEX/priv"
+# include, since there is one hardcoded into portions of coregrind/m_gdbserver.
+
 common_includes := \
 	external/valgrind/ \
 	external/valgrind/cachegrind \
 	external/valgrind/include \
-	external/vex/pub \
+	external/VEX/pub \
 	external/valgrind/coregrind
 
 vex_ldflags := -nodefaultlibs
@@ -65,46 +68,46 @@ LOCAL_MODULE_TAGS := optional
 LOCAL_ARM_MODE := arm
 
 LOCAL_SRC_FILES := \
-	../vex/priv/main_globals.c \
-	../vex/priv/main_main.c \
-	../vex/priv/main_util.c \
-	../vex/priv/ir_defs.c \
-	../vex/priv/ir_match.c \
-	../vex/priv/ir_inject.c \
-	../vex/priv/ir_opt.c \
-	../vex/priv/guest_generic_bb_to_IR.c \
-	../vex/priv/guest_generic_x87.c \
-	../vex/priv/guest_mips_helpers.c \
-	../vex/priv/guest_mips_toIR.c \
-	../vex/priv/guest_x86_helpers.c \
-	../vex/priv/guest_x86_toIR.c \
-	../vex/priv/guest_amd64_helpers.c \
-	../vex/priv/guest_amd64_toIR.c \
-	../vex/priv/guest_ppc_helpers.c \
-	../vex/priv/guest_ppc_toIR.c \
-	../vex/priv/guest_arm_helpers.c \
-	../vex/priv/guest_arm_toIR.c \
-	../vex/priv/guest_s390_helpers.c \
-	../vex/priv/guest_s390_toIR.c \
-	../vex/priv/host_generic_maddf.c \
-	../vex/priv/host_generic_regs.c \
-	../vex/priv/host_generic_simd64.c \
-	../vex/priv/host_generic_simd128.c \
-	../vex/priv/host_generic_simd256.c \
-	../vex/priv/host_generic_reg_alloc2.c \
-	../vex/priv/host_x86_defs.c \
-	../vex/priv/host_x86_isel.c \
-	../vex/priv/host_amd64_defs.c \
-	../vex/priv/host_amd64_isel.c \
-	../vex/priv/host_mips_defs.c \
-	../vex/priv/host_mips_isel.c \
-	../vex/priv/host_ppc_defs.c \
-	../vex/priv/host_ppc_isel.c \
-	../vex/priv/host_arm_defs.c \
-	../vex/priv/host_arm_isel.c \
-	../vex/priv/host_s390_defs.c \
-	../vex/priv/s390_disasm.c \
-	../vex/priv/host_s390_isel.c
+	../VEX/priv/main_globals.c \
+	../VEX/priv/main_main.c \
+	../VEX/priv/main_util.c \
+	../VEX/priv/ir_defs.c \
+	../VEX/priv/ir_match.c \
+	../VEX/priv/ir_inject.c \
+	../VEX/priv/ir_opt.c \
+	../VEX/priv/guest_generic_bb_to_IR.c \
+	../VEX/priv/guest_generic_x87.c \
+	../VEX/priv/guest_mips_helpers.c \
+	../VEX/priv/guest_mips_toIR.c \
+	../VEX/priv/guest_x86_helpers.c \
+	../VEX/priv/guest_x86_toIR.c \
+	../VEX/priv/guest_amd64_helpers.c \
+	../VEX/priv/guest_amd64_toIR.c \
+	../VEX/priv/guest_ppc_helpers.c \
+	../VEX/priv/guest_ppc_toIR.c \
+	../VEX/priv/guest_arm_helpers.c \
+	../VEX/priv/guest_arm_toIR.c \
+	../VEX/priv/guest_s390_helpers.c \
+	../VEX/priv/guest_s390_toIR.c \
+	../VEX/priv/host_generic_maddf.c \
+	../VEX/priv/host_generic_regs.c \
+	../VEX/priv/host_generic_simd64.c \
+	../VEX/priv/host_generic_simd128.c \
+	../VEX/priv/host_generic_simd256.c \
+	../VEX/priv/host_generic_reg_alloc2.c \
+	../VEX/priv/host_x86_defs.c \
+	../VEX/priv/host_x86_isel.c \
+	../VEX/priv/host_amd64_defs.c \
+	../VEX/priv/host_amd64_isel.c \
+	../VEX/priv/host_mips_defs.c \
+	../VEX/priv/host_mips_isel.c \
+	../VEX/priv/host_ppc_defs.c \
+	../VEX/priv/host_ppc_isel.c \
+	../VEX/priv/host_arm_defs.c \
+	../VEX/priv/host_arm_isel.c \
+	../VEX/priv/host_s390_defs.c \
+	../VEX/priv/s390_disasm.c \
+	../VEX/priv/host_s390_isel.c
 
 
 LOCAL_C_INCLUDES := $(common_includes)
