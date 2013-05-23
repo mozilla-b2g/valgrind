@@ -236,6 +236,7 @@ LOCAL_SRC_FILES := \
 	coregrind/m_syswrap/syswrap-x86-darwin.c \
 	coregrind/m_syswrap/syswrap-amd64-darwin.c \
 	coregrind/m_syswrap/syswrap-s390x-linux.c \
+	coregrind/m_syswrap/syswrap-xen.c \
 	coregrind/m_ume/elf.c \
 	coregrind/m_ume/macho.c \
 	coregrind/m_ume/main.c \
