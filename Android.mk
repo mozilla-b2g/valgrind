@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+ifneq ($(B2G_VALGRIND),)
+
 LOCAL_PATH:= $(call my-dir)
 
 ifeq ($(TARGET_DEVICE), generic)
@@ -661,5 +663,7 @@ LOCAL_MODULE_PATH := $(TARGET_OUT_SHARED_LIBRARIES)/valgrind
 LOCAL_SRC_FILES := bionic.supp
 
 include $(BUILD_PREBUILT)
+
+endif
 
 endif
