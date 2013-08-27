@@ -177,6 +177,7 @@ LOCAL_SRC_FILES := \
 	coregrind/m_debuginfo/misc.c \
 	coregrind/m_debuginfo/d3basics.c \
 	coregrind/m_debuginfo/debuginfo.c \
+	coregrind/m_debuginfo/image.c \
 	coregrind/m_debuginfo/readdwarf.c \
 	coregrind/m_debuginfo/readdwarf3.c \
 	coregrind/m_debuginfo/readelf.c \
