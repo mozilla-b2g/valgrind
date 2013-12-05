@@ -380,7 +380,7 @@ LOCAL_NO_CRT := true
 LOCAL_SYSTEM_SHARED_LIBRARIES :=
 
 LOCAL_SRC_FILES := \
-	cachegrind/cg-arch.c \
+	cachegrind/cg_arch.c \
 	cachegrind/cg_main.c
 #	cachegrind/cg-arm.c \
 #	cachegrind/cg-ppc32.c \
@@ -425,7 +425,6 @@ LOCAL_SRC_FILES := \
 	callgrind/main.c \
 	callgrind/sim.c \
 	callgrind/threads.c \
-	cachegrind/cg-arch.c 
 # cachegrind/cg-arm.c \
 # cachegrind/cg-ppc32.c \
 # cachegrind/cg-ppc64.c \
