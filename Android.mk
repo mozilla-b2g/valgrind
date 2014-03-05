@@ -89,6 +89,8 @@ LOCAL_SRC_FILES := \
 	../VEX/priv/guest_ppc_toIR.c \
 	../VEX/priv/guest_arm_helpers.c \
 	../VEX/priv/guest_arm_toIR.c \
+	../VEX/priv/guest_arm64_helpers.c \
+	../VEX/priv/guest_arm64_toIR.c \
 	../VEX/priv/guest_s390_helpers.c \
 	../VEX/priv/guest_s390_toIR.c \
 	../VEX/priv/host_generic_maddf.c \
@@ -107,6 +109,8 @@ LOCAL_SRC_FILES := \
 	../VEX/priv/host_ppc_isel.c \
 	../VEX/priv/host_arm_defs.c \
 	../VEX/priv/host_arm_isel.c \
+	../VEX/priv/host_arm64_defs.c \
+	../VEX/priv/host_arm64_isel.c \
 	../VEX/priv/host_s390_defs.c \
 	../VEX/priv/s390_disasm.c \
 	../VEX/priv/host_s390_isel.c
@@ -380,7 +384,7 @@ LOCAL_NO_CRT := true
 LOCAL_SYSTEM_SHARED_LIBRARIES :=
 
 LOCAL_SRC_FILES := \
-	cachegrind/cg-arch.c \
+	cachegrind/cg_arch.c \
 	cachegrind/cg_main.c
 #	cachegrind/cg-arm.c \
 #	cachegrind/cg-ppc32.c \
@@ -424,13 +428,7 @@ LOCAL_SRC_FILES := \
 	callgrind/jumps.c \
 	callgrind/main.c \
 	callgrind/sim.c \
-	callgrind/threads.c \
-	cachegrind/cg-arch.c 
-# cachegrind/cg-arm.c \
-# cachegrind/cg-ppc32.c \
-# cachegrind/cg-ppc64.c \
-# cachegrind/cg-s390x.c \
-# cachegrind/cg-x86-amd64.c
+	callgrind/threads.c
 
 LOCAL_C_INCLUDES := $(common_includes) \
 	external/valgrind/main/cachegrind
@@ -647,6 +645,23 @@ LOCAL_ARM_MODE := arm
 LOCAL_SRC_FILES := \
 	coregrind/launcher-linux.c \
 	coregrind/m_debuglog.c
+
+LOCAL_C_INCLUDES := $(common_includes)
+
+LOCAL_CFLAGS := $(common_cflags)
+
+include $(BUILD_EXECUTABLE)
+
+# Build vgdb
+include $(CLEAR_VARS)
+
+LOCAL_MODULE := vgdb
+LOCAL_MODULE_TAGS := optional
+LOCAL_ARM_MODE := arm
+
+LOCAL_SRC_FILES := \
+	coregrind/vgdb.c \
+	coregrind/vgdb-invoker-none.c
 
 LOCAL_C_INCLUDES := $(common_includes)
 
