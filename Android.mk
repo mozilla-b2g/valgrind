@@ -118,11 +118,12 @@ LOCAL_SRC_FILES := \
 
 LOCAL_C_INCLUDES := $(common_includes)
 
-LOCAL_CFLAGS := $(common_cflags) \
+LOCAL_CFLAGS := $(common_cflags) -std=gnu99 \
 	-Wbad-function-cast \
 	-Wcast-qual \
 	-Wcast-align \
-	-fstrict-aliasing
+	-fstrict-aliasing \
+  -std=gnu99
 
 include $(BUILD_STATIC_LIBRARY)
 
@@ -134,12 +135,14 @@ LOCAL_MODULE_TAGS := optional
 LOCAL_ARM_MODE := arm
 
 LOCAL_SRC_FILES := \
+  coregrind/m_addrinfo.c \
 	coregrind/m_cache.c \
 	coregrind/m_commandline.c \
 	coregrind/m_clientstate.c \
 	coregrind/m_cpuid.S \
 	coregrind/m_debugger.c \
 	coregrind/m_debuglog.c \
+  coregrind/m_deduppoolalloc.c \
 	coregrind/m_errormgr.c \
 	coregrind/m_execontext.c \
 	coregrind/m_hashtable.c \
@@ -156,6 +159,7 @@ LOCAL_SRC_FILES := \
 	coregrind/m_options.c \
 	coregrind/m_oset.c \
 	coregrind/m_poolalloc.c \
+	coregrind/m_rangemap.c \
 	coregrind/m_redir.c \
 	coregrind/m_sbprofile.c \
 	coregrind/m_seqmatch.c \
@@ -176,6 +180,7 @@ LOCAL_SRC_FILES := \
 	coregrind/m_aspacehl.c \
 	coregrind/m_aspacemgr/aspacemgr-common.c \
 	coregrind/m_aspacemgr/aspacemgr-linux.c \
+	coregrind/m_aspacemgr/aspacemgr-segnames.c \
 	coregrind/m_coredump/coredump-elf.c \
 	coregrind/m_coredump/coredump-macho.c \
 	coregrind/m_debuginfo/misc.c \
@@ -185,6 +190,7 @@ LOCAL_SRC_FILES := \
 	coregrind/m_debuginfo/readdwarf.c \
 	coregrind/m_debuginfo/readdwarf3.c \
 	coregrind/m_debuginfo/readelf.c \
+	coregrind/m_debuginfo/readexidx.c \
 	coregrind/m_debuginfo/readmacho.c \
 	coregrind/m_debuginfo/readpdb.c \
 	coregrind/m_debuginfo/storage.c \
@@ -197,7 +203,6 @@ LOCAL_SRC_FILES := \
 	coregrind/m_dispatch/dispatch-x86-linux.S \
 	coregrind/m_dispatch/dispatch-amd64-linux.S \
 	coregrind/m_dispatch/dispatch-ppc32-linux.S \
-	coregrind/m_dispatch/dispatch-ppc64-linux.S \
 	coregrind/m_dispatch/dispatch-arm-linux.S \
 	coregrind/m_dispatch/dispatch-x86-darwin.S \
 	coregrind/m_dispatch/dispatch-amd64-darwin.S \
@@ -214,10 +219,10 @@ LOCAL_SRC_FILES := \
 	coregrind/m_scheduler/scheduler.c \
 	coregrind/m_scheduler/sema.c \
 	coregrind/m_scheduler/ticket-lock-linux.c \
+	coregrind/m_sigframe/sigframe-common.c \
 	coregrind/m_sigframe/sigframe-x86-linux.c \
 	coregrind/m_sigframe/sigframe-amd64-linux.c \
 	coregrind/m_sigframe/sigframe-ppc32-linux.c \
-	coregrind/m_sigframe/sigframe-ppc64-linux.c \
 	coregrind/m_sigframe/sigframe-arm-linux.c \
 	coregrind/m_sigframe/sigframe-x86-darwin.c \
 	coregrind/m_sigframe/sigframe-amd64-darwin.c \
@@ -225,7 +230,6 @@ LOCAL_SRC_FILES := \
 	coregrind/m_syswrap/syscall-x86-linux.S \
 	coregrind/m_syswrap/syscall-amd64-linux.S \
 	coregrind/m_syswrap/syscall-ppc32-linux.S \
-	coregrind/m_syswrap/syscall-ppc64-linux.S \
 	coregrind/m_syswrap/syscall-arm-linux.S \
 	coregrind/m_syswrap/syscall-x86-darwin.S \
 	coregrind/m_syswrap/syscall-amd64-darwin.S \
@@ -238,7 +242,6 @@ LOCAL_SRC_FILES := \
 	coregrind/m_syswrap/syswrap-x86-linux.c \
 	coregrind/m_syswrap/syswrap-amd64-linux.c \
 	coregrind/m_syswrap/syswrap-ppc32-linux.c \
-	coregrind/m_syswrap/syswrap-ppc64-linux.c \
 	coregrind/m_syswrap/syswrap-arm-linux.c \
 	coregrind/m_syswrap/syswrap-x86-darwin.c \
 	coregrind/m_syswrap/syswrap-amd64-darwin.c \
@@ -260,7 +263,6 @@ LOCAL_SRC_FILES := \
 	coregrind/m_gdbserver/valgrind-low-amd64.c \
 	coregrind/m_gdbserver/valgrind-low-arm.c \
 	coregrind/m_gdbserver/valgrind-low-ppc32.c \
-	coregrind/m_gdbserver/valgrind-low-ppc64.c \
 	coregrind/m_gdbserver/valgrind-low-s390x.c \
 	coregrind/m_gdbserver/valgrind-low-x86.c \
 	coregrind/m_gdbserver/version.c
@@ -270,7 +272,7 @@ LOCAL_C_INCLUDES := $(common_includes)
 LOCAL_LDFLAGS := $(vex_ldflags)
 
 # TODO: split asflags out from cflags.
-LOCAL_CFLAGS := $(common_cflags)
+LOCAL_CFLAGS := $(common_cflags) -std=gnu99
 LOCAL_ASFLAGS := $(common_cflags)
 
 include $(BUILD_STATIC_LIBRARY)
@@ -289,7 +291,7 @@ LOCAL_C_INCLUDES := $(common_includes)
 
 LOCAL_LDFLAGS := $(preload_ldflags)
 
-LOCAL_CFLAGS := $(common_cflags)
+LOCAL_CFLAGS := $(common_cflags) -std=gnu99
 
 include $(BUILD_STATIC_LIBRARY)
 
@@ -312,7 +314,7 @@ LOCAL_C_INCLUDES := $(common_includes)
 
 LOCAL_LDFLAGS := $(preload_ldflags)
 
-LOCAL_CFLAGS := $(common_cflags)
+LOCAL_CFLAGS := $(common_cflags) -std=gnu99
 
 include $(BUILD_SHARED_LIBRARY)
 
@@ -340,7 +342,7 @@ LOCAL_C_INCLUDES := $(common_includes)
 
 LOCAL_LDFLAGS := $(tool_ldflags)
 
-LOCAL_CFLAGS := $(common_cflags)
+LOCAL_CFLAGS := $(common_cflags) -std=gnu99
 
 LOCAL_STATIC_LIBRARIES := libcoregrind-$(TARGET_ARCH)-linux libvex-$(TARGET_ARCH)-linux
 
@@ -365,7 +367,7 @@ LOCAL_C_INCLUDES := $(common_includes)
 
 LOCAL_LDFLAGS := $(preload_ldflags)
 
-LOCAL_CFLAGS := $(common_cflags)
+LOCAL_CFLAGS := $(common_cflags) -std=gnu99
 
 LOCAL_WHOLE_STATIC_LIBRARIES := libreplacemalloc_toolpreload-$(TARGET_ARCH)-linux
 
@@ -396,7 +398,7 @@ LOCAL_C_INCLUDES := $(common_includes)
 
 LOCAL_LDFLAGS := $(tool_ldflags)
 
-LOCAL_CFLAGS := $(common_cflags)
+LOCAL_CFLAGS := $(common_cflags) -std=gnu99
 
 LOCAL_STATIC_LIBRARIES := libcoregrind-$(TARGET_ARCH)-linux libvex-$(TARGET_ARCH)-linux
 
@@ -435,7 +437,7 @@ LOCAL_C_INCLUDES := $(common_includes) \
 
 LOCAL_LDFLAGS := $(tool_ldflags)
 
-LOCAL_CFLAGS := $(common_cflags)
+LOCAL_CFLAGS := $(common_cflags) -std=gnu99
 
 LOCAL_STATIC_LIBRARIES := libcoregrind-$(TARGET_ARCH)-linux libvex-$(TARGET_ARCH)-linux
 
@@ -454,6 +456,7 @@ LOCAL_NO_CRT := true
 LOCAL_SYSTEM_SHARED_LIBRARIES :=
 
 LOCAL_SRC_FILES := \
+	helgrind/hg_addrdescr.c \
 	helgrind/hg_basics.c \
 	helgrind/hg_errors.c \
 	helgrind/hg_lock_n_thread.c \
@@ -465,7 +468,7 @@ LOCAL_C_INCLUDES := $(common_includes)
 
 LOCAL_LDFLAGS := $(tool_ldflags)
 
-LOCAL_CFLAGS := $(common_cflags)
+LOCAL_CFLAGS := $(common_cflags) -std=gnu99
 
 LOCAL_STATIC_LIBRARIES := libcoregrind-$(TARGET_ARCH)-linux libvex-$(TARGET_ARCH)-linux
 
@@ -490,7 +493,7 @@ LOCAL_C_INCLUDES := $(common_includes)
 
 LOCAL_LDFLAGS := $(preload_ldflags)
 
-LOCAL_CFLAGS := $(common_cflags)
+LOCAL_CFLAGS := $(common_cflags) -std=gnu99
 
 LOCAL_WHOLE_STATIC_LIBRARIES := libreplacemalloc_toolpreload-$(TARGET_ARCH)-linux
 
@@ -528,7 +531,7 @@ LOCAL_C_INCLUDES := $(common_includes)
 
 LOCAL_LDFLAGS := $(tool_ldflags)
 
-LOCAL_CFLAGS := $(common_cflags)
+LOCAL_CFLAGS := $(common_cflags) -std=gnu99
 
 LOCAL_STATIC_LIBRARIES := libcoregrind-$(TARGET_ARCH)-linux libvex-$(TARGET_ARCH)-linux
 
@@ -555,7 +558,7 @@ LOCAL_C_INCLUDES := $(common_includes)
 
 LOCAL_LDFLAGS := $(preload_ldflags)
 
-LOCAL_CFLAGS := $(common_cflags)
+LOCAL_CFLAGS := $(common_cflags) -std=gnu99
 
 LOCAL_WHOLE_STATIC_LIBRARIES := libreplacemalloc_toolpreload-$(TARGET_ARCH)-linux
 
@@ -580,7 +583,7 @@ LOCAL_C_INCLUDES := $(common_includes)
 
 LOCAL_LDFLAGS := $(tool_ldflags)
 
-LOCAL_CFLAGS := $(common_cflags)
+LOCAL_CFLAGS := $(common_cflags) -std=gnu99
 
 LOCAL_STATIC_LIBRARIES := libcoregrind-$(TARGET_ARCH)-linux libvex-$(TARGET_ARCH)-linux
 
@@ -604,7 +607,7 @@ LOCAL_C_INCLUDES := $(common_includes)
 
 LOCAL_LDFLAGS := $(preload_ldflags)
 
-LOCAL_CFLAGS := $(common_cflags)
+LOCAL_CFLAGS := $(common_cflags) -std=gnu99
 
 LOCAL_WHOLE_STATIC_LIBRARIES := libreplacemalloc_toolpreload-$(TARGET_ARCH)-linux
 
@@ -629,7 +632,7 @@ LOCAL_C_INCLUDES := $(common_includes)
 
 LOCAL_LDFLAGS := $(tool_ldflags)
 
-LOCAL_CFLAGS := $(common_cflags)
+LOCAL_CFLAGS := $(common_cflags) -std=gnu99
 
 LOCAL_STATIC_LIBRARIES := libcoregrind-$(TARGET_ARCH)-linux libvex-$(TARGET_ARCH)-linux
 
@@ -648,7 +651,7 @@ LOCAL_SRC_FILES := \
 
 LOCAL_C_INCLUDES := $(common_includes)
 
-LOCAL_CFLAGS := $(common_cflags)
+LOCAL_CFLAGS := $(common_cflags) -std=gnu99
 
 include $(BUILD_EXECUTABLE)
 
@@ -665,7 +668,7 @@ LOCAL_SRC_FILES := \
 
 LOCAL_C_INCLUDES := $(common_includes)
 
-LOCAL_CFLAGS := $(common_cflags)
+LOCAL_CFLAGS := $(common_cflags) -std=gnu99
 
 include $(BUILD_EXECUTABLE)
 
