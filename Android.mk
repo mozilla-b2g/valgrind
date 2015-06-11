@@ -34,7 +34,8 @@ common_cflags := \
 	-DVGPV_$(TARGET_ARCH)_linux_android=1 \
 	-DVG_PLATFORM=\"$(TARGET_ARCH)-linux\" \
 	-DVG_LIBDIR=\"/system/lib/valgrind\" \
-	-DANDROID_SYMBOLS_DIR=\"/data/local/symbols\"
+	-DANDROID_SYMBOLS_DIR=\"/data/local/symbols\" \
+	-DENABLE_LINUX_TICKET_LOCK=1
 
 # Note: We will always need a directory that can resolve a "../../VEX/priv"
 # include, since there is one hardcoded into portions of coregrind/m_gdbserver.
