@@ -42,26 +42,53 @@
 #include <sys/user.h>
 #include <sys/wait.h>
 
-#if VEX_HOST_WORDSIZE == 8
-typedef Addr64 CORE_ADDR;
-#elif VEX_HOST_WORDSIZE == 4
-typedef Addr32 CORE_ADDR;
-#else
-# error "unexpected wordsize"
+#ifdef PTRACE_GETREGSET
+// TBD: better have a configure test instead ?
+#define HAVE_PTRACE_GETREGSET
+
+// A bi-arch build using PTRACE_GET/SETREGSET needs
+// some conversion code for register structures.
+// So, better do not use PTRACE_GET/SETREGSET
+// Rather we use PTRACE_GETREGS or PTRACE_PEEKUSER.
+
+// The only platform on which we must use PTRACE_GETREGSET is arm64.
+// The resulting vgdb cannot work in a bi-arch setup.
+// -1 means we will check that PTRACE_GETREGSET works.
+#  if defined(VGA_arm64)
+#define USE_PTRACE_GETREGSET
+#  endif
 #endif
 
-#if VEX_HOST_WORDSIZE == 8
-typedef Addr64 PTRACE_XFER_TYPE;
-typedef void* PTRACE_ARG3_TYPE;
-#elif VEX_HOST_WORDSIZE == 4
-typedef Addr32 PTRACE_XFER_TYPE;
-typedef void* PTRACE_ARG3_TYPE;
-#else
-# error "unexpected wordsize"
+#include <sys/uio.h>
+#include <elf.h>
+
+#include <sys/procfs.h>
+
+// glibc versions prior to 2.5 do not define PTRACE_GETSIGINFO on
+// the platforms we support.
+#if !((__GLIBC__ > 2) || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 5))
+#   ifndef PTRACE_GETSIGINFO
+#   define PTRACE_GETSIGINFO 0x4202
+#   endif
 #endif
 
+// 32-bit or 64-bit wide, depending on primary architecture.
+typedef Addr  CORE_ADDR;
+typedef Addr  PTRACE_XFER_TYPE;
+typedef void* PTRACE_ARG3_TYPE;
+
+// if > 0, pid for which registers have to be restored.
+// if == 0, means we have not yet called setregs (or have already
+// restored the registers).
+static int pid_of_save_regs = 0;
 /* True if we have continued pid_of_save_regs after PTRACE_ATTACH. */
 static Bool pid_of_save_regs_continued = False;
+// When setregs has been called to change the registers of pid_of_save_regs,
+// vgdb cannot transmit the signals intercepted during ptrace.
+// So, we queue them, and will deliver them when detaching.
+// See function waitstopped for more info.
+static int signal_queue_sz = 0;
+static siginfo_t *signal_queue;
 
 /* True when loss of connection indicating that the Valgrind
    process is dying. */
@@ -167,7 +194,8 @@ typedef struct {
    Int lwpid;
 }
 VgdbThreadState;
-static VgdbThreadState vgdb_threads[VG_N_THREADS];
+static VgdbThreadState *vgdb_threads;
+static int vg_n_threads;
 
 static const
 HChar* name_of_ThreadStatus ( ThreadStatus status )
@@ -186,7 +214,7 @@ HChar* name_of_ThreadStatus ( ThreadStatus status )
 static 
 char *status_image (int status)
 {
-   static char result[256];
+   static char result[256];  // large enough
    int sz = 0;
 #define APPEND(...) sz += snprintf (result+sz, 256 - sz - 1, __VA_ARGS__)
   
@@ -252,9 +280,45 @@ Bool waitstopped (pid_t pid, int signal_expected, const char *msg)
          break;
 
       /* pid received a signal which is not the signal we are waiting for.
-         We continue pid, transmitting this signal. */
-      DEBUG(1, "waitstopped PTRACE_CONT with signal %d\n", signal_received);
-      res = ptrace (PTRACE_CONT, pid, NULL, signal_received);
+         If we have not (yet) changed the registers of the inferior
+         or we have (already) reset them, we can transmit the signal.
+
+         If we have already set the registers of the inferior, we cannot
+         transmit the signal, as this signal would arrive when the
+         gdbserver code runs. And valgrind only expects signals to
+         arrive in a small code portion around
+         client syscall logic, where signal are unmasked (see e.g.
+         m_syswrap/syscall-x86-linux.S ML_(do_syscall_for_client_WRK).
+
+         As ptrace is forcing a call to gdbserver by jumping
+         'out of this region', signals are not masked, but
+         will arrive outside of the allowed/expected code region.
+         So, if we have changed the registers of the inferior, we
+         rather queue the signal to transmit them when detaching,
+         after having restored the registers to the initial values. */
+      if (pid_of_save_regs) {
+         siginfo_t *newsiginfo;
+
+         // realloc a bigger queue, and store new signal at the end.
+         // This is not very efficient but we assume not many sigs are queued.
+         signal_queue_sz++;
+         signal_queue = vrealloc(signal_queue, 
+                                 sizeof(siginfo_t) * signal_queue_sz);
+         newsiginfo = signal_queue + (signal_queue_sz - 1);
+
+         res = ptrace (PTRACE_GETSIGINFO, pid, NULL, newsiginfo);
+         if (res != 0) {
+            ERROR(errno, "PTRACE_GETSIGINFO failed: signal lost !!!!\n");
+            signal_queue_sz--;
+         } else
+            DEBUG(1, "waitstopped PTRACE_CONT, queuing signal %d"
+                  " si_signo %d si_pid %d\n",
+                  signal_received, newsiginfo->si_signo, newsiginfo->si_pid);
+         res = ptrace (PTRACE_CONT, pid, NULL, 0);
+      } else {
+         DEBUG(1, "waitstopped PTRACE_CONT with signal %d\n", signal_received);
+         res = ptrace (PTRACE_CONT, pid, NULL, signal_received);
+      }
       if (res != 0) {
          ERROR(errno, "waitstopped PTRACE_CONT\n");
          return False;
@@ -330,12 +394,14 @@ Bool acquire_and_suspend_threads (pid_t pid)
 
    if (shared32 != NULL) {
       vgt = shared32->threads;
+      vg_n_threads = shared32->vg_n_threads;
       sz_tst = shared32->sizeof_ThreadState;
       off_status = shared32->offset_status;
       off_lwpid = shared32->offset_lwpid;
    }
    else if (shared64 != NULL) {
       vgt = shared64->threads;
+      vg_n_threads = shared64->vg_n_threads;
       sz_tst = shared64->sizeof_ThreadState;
       off_status = shared64->offset_status;
       off_lwpid = shared64->offset_lwpid;
@@ -343,8 +409,11 @@ Bool acquire_and_suspend_threads (pid_t pid)
       assert (0);
    }
 
+   vgdb_threads = vmalloc(vg_n_threads * sizeof vgdb_threads[0]);
+
    /* note: the entry 0 is unused */
-   for (i = 1; i < VG_N_THREADS; i++) {
+   DEBUG(1, "examining thread entries from tid 1 to tid %d\n", vg_n_threads-1);
+   for (i = 1; i < vg_n_threads; i++) {
       vgt += sz_tst;
       rw = ptrace_read_memory(pid, vgt+off_status,
                               &(vgdb_threads[i].status),
@@ -411,7 +480,7 @@ void detach_from_all_threads (pid_t pid)
    Bool pid_found = False;
 
    /* detach from all the threads  */
-   for (i = 1; i < VG_N_THREADS; i++) {
+   for (i = 1; i < vg_n_threads; i++) {
       if (vgdb_threads[i].status != VgTs_Empty) {
          if (vgdb_threads[i].status == VgTs_Init
              && vgdb_threads[i].lwpid == 0) {
@@ -437,6 +506,8 @@ void detach_from_all_threads (pid_t pid)
       }
    }
 
+   free (vgdb_threads);
+
    if (!pid_found && pid) {
       /* No threads are live. Process is busy stopping.
          We need to detach from pid explicitely. */
@@ -447,10 +518,17 @@ void detach_from_all_threads (pid_t pid)
    }
 }
 
-// if > 0, pid for which registers have to be restored.
-static int pid_of_save_regs = 0;
+#  if defined(VGA_arm64) || defined(VGA_tilegx)
+/* arm64 is extra special, old glibc defined kernel user_pt_regs, but
+   newer glibc instead define user_regs_struct. */
+#    ifdef HAVE_SYS_USER_REGS
+static struct user_regs_struct user_save;
+#    else
+static struct user_pt_regs user_save;
+#    endif
+#  else
 static struct user user_save;
-
+#  endif
 // The below indicates if ptrace_getregs (and ptrace_setregs) can be used.
 // Note that some linux versions are defining PTRACE_GETREGS but using
 // it gives back EIO.
@@ -462,6 +540,10 @@ static struct user user_save;
 #ifdef HAVE_PTRACE_GETREGS
 static int has_working_ptrace_getregs = -1;
 #endif
+// Similar but for PTRACE_GETREGSET
+#ifdef HAVE_PTRACE_GETREGSET
+static int has_working_ptrace_getregset = -1;
+#endif
 
 /* Get the registers from pid into regs.
    regs_bsz value gives the length of *regs. 
@@ -470,6 +552,53 @@ static
 Bool getregs (pid_t pid, void *regs, long regs_bsz)
 {
    DEBUG(1, "getregs regs_bsz %ld\n", regs_bsz);
+#  ifdef HAVE_PTRACE_GETREGSET
+#  ifndef USE_PTRACE_GETREGSET
+   if (has_working_ptrace_getregset)
+      DEBUG(1, "PTRACE_GETREGSET defined, not used (yet?) by vgdb\n");
+   has_working_ptrace_getregset = 0;
+#  endif
+   if (has_working_ptrace_getregset) {
+      // Platforms having GETREGSET
+      long res;
+      elf_gregset_t elf_regs;
+      struct iovec iovec;
+
+      DEBUG(1, "getregs PTRACE_GETREGSET sizeof(elf_regs) %zu\n",
+            sizeof(elf_regs));
+      iovec.iov_base = regs;
+      iovec.iov_len =  sizeof(elf_regs);
+
+      res = ptrace (PTRACE_GETREGSET, pid, NT_PRSTATUS, &iovec);
+      if (res == 0) {
+         if (has_working_ptrace_getregset == -1) {
+            // First call to PTRACE_GETREGSET succesful =>
+            has_working_ptrace_getregset = 1;
+            DEBUG(1, "detected a working PTRACE_GETREGSET\n");
+         }
+         assert (has_working_ptrace_getregset == 1);
+         return True;
+      }
+      else if (has_working_ptrace_getregset == 1) {
+         // We had a working call, but now it fails.
+         // This is unexpected.
+         ERROR(errno, "PTRACE_GETREGSET %ld\n", res);
+         return False;
+      } else {
+         // Check this is the first call:
+         assert (has_working_ptrace_getregset == -1);
+         if (errno == EIO) {
+            DEBUG(1, "detected a broken PTRACE_GETREGSET with EIO\n");
+            has_working_ptrace_getregset = 0;
+            // Fall over to the PTRACE_GETREGS or PTRACE_PEEKUSER case.
+         } else {
+            ERROR(errno, "broken PTRACE_GETREGSET unexpected errno %ld\n", res);
+            return False;
+         }
+      }
+   }
+#  endif
+
 #  ifdef HAVE_PTRACE_GETREGS
    if (has_working_ptrace_getregs) {
       // Platforms having GETREGS
@@ -527,8 +656,8 @@ Bool getregs (pid_t pid, void *regs, long regs_bsz)
       return True;
    }
 
-   // If neither PTRACE_GETREGS not PTRACE_PEEKUSER have returned,
-   // then we are in serious trouble.
+   // If neither of PTRACE_GETREGSET PTRACE_GETREGS PTRACE_PEEKUSER have
+   // returned, then we are in serious trouble.
    assert (0);
 }
 
@@ -539,6 +668,31 @@ static
 Bool setregs (pid_t pid, void *regs, long regs_bsz)
 {
    DEBUG(1, "setregs regs_bsz %ld\n", regs_bsz);
+
+// Note : the below is checking for GETREGSET, not SETREGSET
+// as if one is defined and working, the other one should also work.
+#  ifdef HAVE_PTRACE_GETREGSET
+   if (has_working_ptrace_getregset) {
+      // Platforms having SETREGSET
+      long res;
+      elf_gregset_t elf_regs;
+      struct iovec iovec;
+
+      // setregset can never be called before getregset has done a runtime check.
+      assert (has_working_ptrace_getregset == 1);
+      DEBUG(1, "setregs PTRACE_SETREGSET sizeof(elf_regs) %zu\n",
+            sizeof(elf_regs));
+      iovec.iov_base = regs;
+      iovec.iov_len =  sizeof(elf_regs);
+      res = ptrace (PTRACE_SETREGSET, pid, NT_PRSTATUS, &iovec);
+      if (res != 0) {
+         ERROR(errno, "PTRACE_SETREGSET %ld\n", res);
+         return False;
+      }
+      return True;
+   }
+#  endif
+
 // Note : the below is checking for GETREGS, not SETREGS
 // as if one is defined and working, the other one should also work.
 #  ifdef HAVE_PTRACE_GETREGS
@@ -588,6 +742,11 @@ Bool setregs (pid_t pid, void *regs, long regs_bsz)
 static
 void restore_and_detach (pid_t pid)
 {
+   int res;
+
+   DEBUG(1, "restore_and_detach pid %d pid_of_save_regs %d\n",
+         pid, pid_of_save_regs);
+
    if (pid_of_save_regs) {
       /* In case the 'main pid' has been continued, we need to stop it
          before resetting the registers. */
@@ -602,10 +761,32 @@ void restore_and_detach (pid_t pid)
          ERROR(errno, "setregs restore registers pid %d after cont\n",
                pid_of_save_regs);
       }
+
+      /* Now, we transmit all the signals we have queued. */
+      if (signal_queue_sz > 0) {
+         int i;
+         for (i = 0; i < signal_queue_sz; i++) {
+            DEBUG(1, "PTRACE_CONT to transmit queued signal %d\n",
+                  signal_queue[i].si_signo);
+            res = ptrace (PTRACE_CONT, pid_of_save_regs, NULL,
+                          signal_queue[i].si_signo);
+            if (res != 0)
+               ERROR(errno, "PTRACE_CONT with signal %d\n",
+                     signal_queue[i].si_signo);
+            if (!stop(pid_of_save_regs, "sigstop after transmit sig"))
+               DEBUG(0, "Could not sigstop after transmit sig");
+         }
+         free (signal_queue);
+         signal_queue = NULL;
+         signal_queue_sz = 0;
+      }
       pid_of_save_regs = 0;
    } else {
       DEBUG(1, "PTRACE_SETREGS restore registers: no pid\n");
    }
+   if (signal_queue)
+      ERROR (0, "One or more signals queued were not delivered. "
+             "First signal: %d\n", signal_queue[0].si_signo);
    detach_from_all_threads(pid);
 }
 
@@ -613,8 +794,19 @@ Bool invoker_invoke_gdbserver (pid_t pid)
 {
    long res;
    Bool stopped;
+#  if defined(VGA_arm64) || defined(VGA_tilegx)
+/* arm64 is extra special, old glibc defined kernel user_pt_regs, but
+   newer glibc instead define user_regs_struct. */
+#    ifdef HAVE_SYS_USER_REGS
+   struct user_regs_struct user_mod;
+#    else
+   struct user_pt_regs user_mod;
+#    endif
+#  else
    struct user user_mod;
-   Addr sp;
+#  endif
+   Addr sp __attribute__((unused)); // Not used on all platforms.
+
    /* A specific int value is passed to invoke_gdbserver, to check
       everything goes according to the plan. */
    const int check = 0x8BADF00D; // ate bad food.
@@ -666,9 +858,11 @@ Bool invoker_invoke_gdbserver (pid_t pid)
    }
 #elif defined(VGA_arm)
    sp = user_mod.regs.uregs[13];
+#elif defined(VGA_arm64)
+   sp = user_mod.sp;
 #elif defined(VGA_ppc32)
    sp = user_mod.regs.gpr[1];
-#elif defined(VGA_ppc64)
+#elif defined(VGA_ppc64be) || defined(VGA_ppc64le)
    sp = user_mod.regs.gpr[1];
 #elif defined(VGA_s390x)
    sp = user_mod.regs.gprs[15];
@@ -677,8 +871,10 @@ Bool invoker_invoke_gdbserver (pid_t pid)
    sp = p[29];
 #elif defined(VGA_mips64)
    sp = user_mod.regs[29];
+#elif defined(VGA_tilegx)
+   sp = user_mod.sp;
 #else
-   I_die_here : (sp) architecture missing in vgdb.c
+   I_die_here : (sp) architecture missing in vgdb-invoker-ptrace.c
 #endif
 
 
@@ -732,7 +928,7 @@ Bool invoker_invoke_gdbserver (pid_t pid)
       I_die_here : not x86 or amd64 in x86/amd64 section/
 #endif
 
-#elif defined(VGA_ppc32) || defined(VGA_ppc64)
+#elif defined(VGA_ppc32) || defined(VGA_ppc64be) || defined(VGA_ppc64le)
       user_mod.regs.nip = shared32->invoke_gdbserver;
       user_mod.regs.trap = -1L;
       /* put check arg in register 3 */
@@ -747,6 +943,9 @@ Bool invoker_invoke_gdbserver (pid_t pid)
       user_mod.regs.uregs[14] = bad_return;
       user_mod.regs.uregs[15] = shared32->invoke_gdbserver;
 
+#elif defined(VGA_arm64)
+      XERROR(0, "TBD arm64: vgdb a 32 bits executable with a 64 bits exe");
+
 #elif defined(VGA_s390x)
       XERROR(0, "(fn32) s390x has no 32bits implementation");
 #elif defined(VGA_mips32)
@@ -759,10 +958,10 @@ Bool invoker_invoke_gdbserver (pid_t pid)
       /* make stack space for args */
       p[29] = sp - 32;
 
-#elif defined(VGA_mips64)
+#elif defined(VGA_mips64) || defined(VGA_tilegx)
       assert(0); // cannot vgdb a 32 bits executable with a 64 bits exe
 #else
-      I_die_here : architecture missing in vgdb.c
+      I_die_here : architecture missing in vgdb-invoker-ptrace.c
 #endif
       }
 
@@ -797,15 +996,22 @@ Bool invoker_invoke_gdbserver (pid_t pid)
 
 #elif defined(VGA_arm)
       assert(0); // cannot vgdb a 64 bits executable with a 32 bits exe
+#elif defined(VGA_arm64)
+      user_mod.regs[0] = check;
+      user_mod.sp = sp;
+      user_mod.pc = shared64->invoke_gdbserver;
+      /* put NULL return address in Link Register */
+      user_mod.regs[30] = bad_return;
+
 #elif defined(VGA_ppc32)
       assert(0); // cannot vgdb a 64 bits executable with a 32 bits exe
-#elif defined(VGA_ppc64)
-      Addr64 func_addr;
-      Addr64 toc_addr;
+#elif defined(VGA_ppc64be)
+      Addr func_addr;
+      Addr toc_addr;
       int rw;
       rw = ptrace_read_memory(pid, shared64->invoke_gdbserver,
                               &func_addr,
-                              sizeof(Addr64));
+                              sizeof(Addr));
       if (rw != 0) {
          ERROR(rw, "ppc64 read func_addr\n");
          detach_from_all_threads(pid);
@@ -813,7 +1019,7 @@ Bool invoker_invoke_gdbserver (pid_t pid)
       }
       rw = ptrace_read_memory(pid, shared64->invoke_gdbserver+8,
                               &toc_addr,
-                              sizeof(Addr64));
+                              sizeof(Addr));
       if (rw != 0) {
          ERROR(rw, "ppc64 read toc_addr\n");
          detach_from_all_threads(pid);
@@ -825,6 +1031,16 @@ Bool invoker_invoke_gdbserver (pid_t pid)
       user_mod.regs.gpr[1] = sp - 220;
       user_mod.regs.gpr[2] = toc_addr;
       user_mod.regs.nip = func_addr;
+      user_mod.regs.trap = -1L;
+      /* put check arg in register 3 */
+      user_mod.regs.gpr[3] = check;
+      /* put bad_return return address in Link Register */
+      user_mod.regs.link = bad_return;
+#elif defined(VGA_ppc64le)
+      /* LE does not use the function pointer structure used in BE */
+      user_mod.regs.nip = shared64->invoke_gdbserver;
+      user_mod.regs.gpr[1] = sp - 512;
+      user_mod.regs.gpr[12] = user_mod.regs.nip;
       user_mod.regs.trap = -1L;
       /* put check arg in register 3 */
       user_mod.regs.gpr[3] = check;
@@ -849,8 +1065,14 @@ Bool invoker_invoke_gdbserver (pid_t pid)
       user_mod.regs[31] = bad_return;
       user_mod.regs[34] = shared64->invoke_gdbserver;
       user_mod.regs[25] = shared64->invoke_gdbserver;
+#elif defined(VGA_tilegx)
+      /* put check arg in register r0 */
+      user_mod.regs[0] = check;
+      /* put NULL return address in lr */
+      user_mod.lr = bad_return;
+      user_mod.pc = shared64->invoke_gdbserver;
 #else
-      I_die_here: architecture missing in vgdb.c
+      I_die_here: architecture missing in vgdb-invoker-ptrace.c
 #endif
    }
    else {

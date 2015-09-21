@@ -61,6 +61,7 @@ EXTRA_DIST = \
 	ssse3_misaligned.stderr.exp ssse3_misaligned.stdout.exp \
 	ssse3_misaligned.vgtest ssse3_misaligned.c \
 	x86locked.vgtest x86locked.stdout.exp x86locked.stderr.exp \
+	x87trigOOR.vgtest x87trigOOR.stdout.exp x87trigOOR.stderr.exp \
 	yield.stderr.exp yield.stdout.exp yield.disabled \
 	xadd.stdout.exp xadd.stderr.exp xadd.vgtest
 
@@ -78,6 +79,7 @@ check_PROGRAMS = \
 	bug152818-x86 \
 	cmpxchg8b \
 	cpuid \
+	cse_fail \
 	fcmovnu \
 	fpu_lazy_eflags \
 	fxtract \
@@ -94,6 +96,7 @@ check_PROGRAMS = \
 	shift_ndep \
 	smc1 \
 	x86locked \
+	x87trigOOR \
 	yield \
 	xadd
 if BUILD_SSSE3_TESTS
@@ -103,7 +106,7 @@ if BUILD_LZCNT_TESTS
  check_PROGRAMS += lzcnt32
 endif
 if !VGCONF_OS_IS_DARWIN
- check_PROGRAMS += cse_fail faultstatus
+ check_PROGRAMS += faultstatus
 endif
 if BUILD_MOVBE_TESTS
  check_PROGRAMS += movbe

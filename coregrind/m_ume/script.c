@@ -35,14 +35,13 @@
 #include "pub_core_libcassert.h"    // VG_(exit), vg_assert
 #include "pub_core_libcfile.h"      // VG_(close) et al
 #include "pub_core_libcprint.h"
-#include "pub_core_xarray.h"
-#include "pub_core_clientstate.h"
+#include "pub_core_clientstate.h"   // VG_(args_the_exename)
 #include "pub_core_mallocfree.h"    // VG_(strdup)
 #include "pub_core_ume.h"           // self
 
 #include "priv_ume.h"
 
-Bool VG_(match_script)(const void *hdr, Int len)
+Bool VG_(match_script)(const void *hdr, SizeT len)
 {
    const HChar* script = hdr;
    const HChar* end    = script + len;
@@ -55,7 +54,7 @@ Bool VG_(match_script)(const void *hdr, Int len)
    // Find interpreter name, make sure it's an absolute path (starts with
    // '/') and has at least one more char.  First, skip over any space
    // between the #! and the start of the interpreter name
-   while (interp < end && VG_(isspace)(*interp)) interp++;
+   while (interp < end && (*interp == ' ' || *interp == '\t')) interp++;
 
    // overrun?
    if (interp >= end)   return False;  // can't find start of interp name
@@ -80,7 +79,7 @@ Bool VG_(match_script)(const void *hdr, Int len)
 Int VG_(load_script)(Int fd, const HChar* name, ExeInfo* info)
 {
    HChar  hdr[4096];
-   Int    len = 4096;
+   Int    len = sizeof hdr;
    Int    eol;
    HChar* interp;
    HChar* end;
@@ -101,7 +100,7 @@ Int VG_(load_script)(Int fd, const HChar* name, ExeInfo* info)
 
    end    = hdr + len;
    interp = hdr + 2;
-   while (interp < end && VG_(isspace)(*interp))
+   while (interp < end && (*interp == ' ' || *interp == '\t'))
       interp++;
 
    vg_assert(*interp == '/');   /* absolute path only for interpreter */

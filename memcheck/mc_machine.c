@@ -41,60 +41,24 @@
 #include "pub_tool_libcassert.h"
 #include "pub_tool_libcprint.h"
 #include "pub_tool_tooliface.h"
+#include "pub_tool_guest.h"         // VexGuestArchState
 
 #include "mc_include.h"
 
-#undef MC_SIZEOF_GUEST_STATE
+#define MC_SIZEOF_GUEST_STATE  sizeof(VexGuestArchState)
 
-#if defined(VGA_x86)
-# include "libvex_guest_x86.h"
-# define MC_SIZEOF_GUEST_STATE sizeof(VexGuestX86State)
-#endif
-
-#if defined(VGA_amd64)
-# include "libvex_guest_amd64.h"
-# define MC_SIZEOF_GUEST_STATE sizeof(VexGuestAMD64State)
-#endif
-
-#if defined(VGA_ppc32)
-# include "libvex_guest_ppc32.h"
-# define MC_SIZEOF_GUEST_STATE sizeof(VexGuestPPC32State)
-#endif
-
-#if defined(VGA_ppc64)
-# include "libvex_guest_ppc64.h"
-# define MC_SIZEOF_GUEST_STATE sizeof(VexGuestPPC64State)
-#endif
-
-#if defined(VGA_s390x)
-# include "libvex_guest_s390x.h"
-# define MC_SIZEOF_GUEST_STATE sizeof(VexGuestS390XState)
-#endif
-
-#if defined(VGA_arm)
-# include "libvex_guest_arm.h"
-# define MC_SIZEOF_GUEST_STATE sizeof(VexGuestARMState)
-#endif
-
-#if defined(VGA_arm64)
-# include "libvex_guest_arm64.h"
-# define MC_SIZEOF_GUEST_STATE sizeof(VexGuestARM64State)
-#endif
-
-#if defined(VGA_mips32)
-# include "libvex_guest_mips32.h"
-# define MC_SIZEOF_GUEST_STATE sizeof(VexGuestMIPS32State)
-#endif
-
-#if defined(VGA_mips64)
-# include "libvex_guest_mips64.h"
-# define MC_SIZEOF_GUEST_STATE sizeof(VexGuestMIPS64State)
+__attribute__((unused))
+#if defined(VGA_tilegx)
+# include "libvex_guest_tilegx.h"
+# define MC_SIZEOF_GUEST_STATE sizeof(VexGuestTILEGXState)
 #endif
 
 static inline Bool host_is_big_endian ( void ) {
    UInt x = 0x11223344;
    return 0x1122 == *(UShort*)(&x);
 }
+
+__attribute__((unused))
 static inline Bool host_is_little_endian ( void ) {
    UInt x = 0x11223344;
    return 0x3344 == *(UShort*)(&x);
@@ -150,7 +114,7 @@ static Int get_otrack_shadow_offset_wrk ( Int offset, Int szB )
 {
    /* -------------------- ppc64 -------------------- */
 
-#  if defined(VGA_ppc64)
+#  if defined(VGA_ppc64be) || defined(VGA_ppc64le)
 
 #  define GOF(_fieldname) \
       (offsetof(VexGuestPPC64State,guest_##_fieldname))
@@ -160,7 +124,12 @@ static Int get_otrack_shadow_offset_wrk ( Int offset, Int szB )
    Int  sz   = szB;
    Int  o    = offset;
    tl_assert(sz > 0);
+
+#if defined(VGA_ppc64be)
    tl_assert(host_is_big_endian());
+#elif defined(VGA_ppc64le)
+   tl_assert(host_is_little_endian());
+#endif
 
    if (sz == 8 || sz == 4) {
       /* The point of this is to achieve
@@ -168,7 +137,11 @@ static Int get_otrack_shadow_offset_wrk ( Int offset, Int szB )
             return GOF(GPRn);
          by testing ox instead of o, and setting ox back 4 bytes when sz == 4.
       */
+#if defined(VGA_ppc64le)
+      Int ox = o;
+#else
       Int ox = sz == 8 ? o : (o - 4);
+#endif
       if (ox == GOF(GPR0)) return ox;
       if (ox == GOF(GPR1)) return ox;
       if (ox == GOF(GPR2)) return ox;
@@ -211,8 +184,8 @@ static Int get_otrack_shadow_offset_wrk ( Int offset, Int szB )
    if (o == GOF(FPROUND)   && sz == 1) return -1;
    if (o == GOF(DFPROUND)  && sz == 1) return -1;
    if (o == GOF(EMNOTE)    && sz == 4) return -1;
-   if (o == GOF(TISTART)   && sz == 8) return -1;
-   if (o == GOF(TILEN)     && sz == 8) return -1;
+   if (o == GOF(CMSTART)   && sz == 8) return -1;
+   if (o == GOF(CMLEN)     && sz == 8) return -1;
    if (o == GOF(VSCR)      && sz == 4) return -1;
    if (o == GOF(VRSAVE)    && sz == 4) return -1;
    if (o == GOF(REDIR_SP)  && sz == 8) return -1;
@@ -368,7 +341,6 @@ static Int get_otrack_shadow_offset_wrk ( Int offset, Int szB )
    Int  o  = offset;
    Int  sz = szB;
    tl_assert(sz > 0);
-   tl_assert(host_is_big_endian());
 
    if (o == GOF(GPR0) && sz == 4) return o;
    if (o == GOF(GPR1) && sz == 4) return o;
@@ -412,8 +384,8 @@ static Int get_otrack_shadow_offset_wrk ( Int offset, Int szB )
    if (o == GOF(DFPROUND)  && sz == 1) return -1;
    if (o == GOF(VRSAVE)    && sz == 4) return -1;
    if (o == GOF(EMNOTE)    && sz == 4) return -1;
-   if (o == GOF(TISTART)   && sz == 4) return -1;
-   if (o == GOF(TILEN)     && sz == 4) return -1;
+   if (o == GOF(CMSTART)   && sz == 4) return -1;
+   if (o == GOF(CMLEN)     && sz == 4) return -1;
    if (o == GOF(VSCR)      && sz == 4) return -1;
    if (o == GOF(REDIR_SP)  && sz == 4) return -1;
    if (o == GOF(SPRG3_RO)  && sz == 4) return -1;
@@ -599,10 +571,10 @@ static Int get_otrack_shadow_offset_wrk ( Int offset, Int szB )
    if (o == GOF(IP_AT_SYSCALL) && sz == 8) return -1; /* slot unused */
    if (o == GOF(IDFLAG)  && sz == 8) return -1; /* slot used for %DH */
    if (o == GOF(ACFLAG)  && sz == 8) return -1; /* slot unused */
-   if (o == GOF(FS_ZERO) && sz == 8) return -1; /* slot unused */
-   if (o == GOF(GS_0x60) && sz == 8) return -1; /* slot unused */
-   if (o == GOF(TISTART) && sz == 8) return -1; /* slot unused */
-   if (o == GOF(TILEN)   && sz == 8) return -1; /* slot unused */
+   if (o == GOF(FS_CONST) && sz == 8) return -1; /* slot unused */
+   if (o == GOF(GS_CONST) && sz == 8) return -1; /* slot unused */
+   if (o == GOF(CMSTART) && sz == 8) return -1; /* slot unused */
+   if (o == GOF(CMLEN)   && sz == 8) return -1; /* slot unused */
    if (o == GOF(NRADDR)  && sz == 8) return -1; /* slot unused */
 
    /* Treat %AH, %BH, %CH, %DH as independent registers.  To do this
@@ -714,8 +686,8 @@ static Int get_otrack_shadow_offset_wrk ( Int offset, Int szB )
    if (o == GOF(IP_AT_SYSCALL) && sz == 4) return -1; /* slot unused */
    if (o == GOF(IDFLAG)  && sz == 4) return -1; /* slot used for %DH */
    if (o == GOF(ACFLAG)  && sz == 4) return -1; /* slot unused */
-   if (o == GOF(TISTART) && sz == 4) return -1; /* slot unused */
-   if (o == GOF(TILEN)   && sz == 4) return -1; /* slot unused */
+   if (o == GOF(CMSTART) && sz == 4) return -1; /* slot unused */
+   if (o == GOF(CMLEN)   && sz == 4) return -1; /* slot unused */
    if (o == GOF(NRADDR)  && sz == 4) return -1; /* slot unused */
 
    /* Treat %AH, %BH, %CH, %DH as independent registers.  To do this
@@ -827,8 +799,8 @@ static Int get_otrack_shadow_offset_wrk ( Int offset, Int szB )
       return o;
    if (o == GOF(CC_DEP2)  && sz == 8) return o;
    if (o == GOF(CC_NDEP)  && sz == 8) return -1;
-   if (o == GOF(TISTART)  && sz == 8) return -1;
-   if (o == GOF(TILEN)    && sz == 8) return -1;
+   if (o == GOF(CMSTART)  && sz == 8) return -1;
+   if (o == GOF(CMLEN)    && sz == 8) return -1;
    if (o == GOF(NRADDR)   && sz == 8) return -1;
    if (o == GOF(IP_AT_SYSCALL) && sz == 8) return -1;
    if (o == GOF(fpc)      && sz == 4) return -1;
@@ -890,7 +862,7 @@ static Int get_otrack_shadow_offset_wrk ( Int offset, Int szB )
    //if (o == GOF(SYSCALLNO)     && sz == 4) return -1; /* slot unused */
    //if (o == GOF(CC)     && sz == 4) return -1; /* slot unused */
    //if (o == GOF(EMNOTE)     && sz == 4) return -1; /* slot unused */
-   //if (o == GOF(TISTART)     && sz == 4) return -1; /* slot unused */
+   //if (o == GOF(CMSTART)     && sz == 4) return -1; /* slot unused */
    //if (o == GOF(NRADDR)     && sz == 4) return -1; /* slot unused */
 
    if (o == GOF(FPSCR)    && sz == 4) return -1;
@@ -953,8 +925,8 @@ static Int get_otrack_shadow_offset_wrk ( Int offset, Int szB )
       if (o >= GOF(D30) && o+sz <= GOF(D30)+2*SZB(D30)) return GOF(D30); // Q15
    }
 
-   if (o == GOF(TISTART) && sz == 4) return -1;
-   if (o == GOF(TILEN)   && sz == 4) return -1;
+   if (o == GOF(CMSTART) && sz == 4) return -1;
+   if (o == GOF(CMLEN)   && sz == 4) return -1;
 
    VG_(printf)("MC_(get_otrack_shadow_offset)(arm)(off=%d,sz=%d)\n",
                offset,szB);
@@ -982,6 +954,81 @@ static Int get_otrack_shadow_offset_wrk ( Int offset, Int szB )
    if (o == GOF(X1)  && is48) return o;
    if (o == GOF(X2)  && is48) return o;
    if (o == GOF(X3)  && is48) return o;
+   if (o == GOF(X4)  && is48) return o;
+   if (o == GOF(X5)  && is48) return o;
+   if (o == GOF(X6)  && is48) return o;
+   if (o == GOF(X7)  && is48) return o;
+   if (o == GOF(X8)  && is48) return o;
+   if (o == GOF(X9)  && is48) return o;
+   if (o == GOF(X10) && is48) return o;
+   if (o == GOF(X11) && is48) return o;
+   if (o == GOF(X12) && is48) return o;
+   if (o == GOF(X13) && is48) return o;
+   if (o == GOF(X14) && is48) return o;
+   if (o == GOF(X15) && is48) return o;
+   if (o == GOF(X16) && is48) return o;
+   if (o == GOF(X17) && is48) return o;
+   if (o == GOF(X18) && is48) return o;
+   if (o == GOF(X19) && is48) return o;
+   if (o == GOF(X20) && is48) return o;
+   if (o == GOF(X21) && is48) return o;
+   if (o == GOF(X22) && is48) return o;
+   if (o == GOF(X23) && is48) return o;
+   if (o == GOF(X24) && is48) return o;
+   if (o == GOF(X25) && is48) return o;
+   if (o == GOF(X26) && is48) return o;
+   if (o == GOF(X27) && is48) return o;
+   if (o == GOF(X28) && is48) return o;
+   if (o == GOF(X29) && is48) return o;
+   if (o == GOF(X30) && is48) return o;
+   if (o == GOF(XSP) && is48) return o;
+
+   if (o == GOF(PC)  && is48) return -1; // untracked
+   if (o == GOF(CC_DEP1) && sz == 8) return o;
+   if (o == GOF(CC_DEP2) && sz == 8) return o;
+
+   if (o == GOF(CC_OP)     && sz == 8) return -1; // untracked
+   if (o == GOF(CC_NDEP)   && sz == 8) return -1; // untracked
+   if (o == GOF(TPIDR_EL0) && sz == 8) return -1; // untracked
+
+   if (o >= GOF(Q0)   && o+sz <= GOF(Q0) +SZB(Q0))  return GOF(Q0);
+   if (o >= GOF(Q1)   && o+sz <= GOF(Q1) +SZB(Q1))  return GOF(Q1);
+   if (o >= GOF(Q2)   && o+sz <= GOF(Q2) +SZB(Q2))  return GOF(Q2);
+   if (o >= GOF(Q3)   && o+sz <= GOF(Q3) +SZB(Q3))  return GOF(Q3);
+   if (o >= GOF(Q4)   && o+sz <= GOF(Q4) +SZB(Q4))  return GOF(Q4);
+   if (o >= GOF(Q5)   && o+sz <= GOF(Q5) +SZB(Q5))  return GOF(Q5);
+   if (o >= GOF(Q6)   && o+sz <= GOF(Q6) +SZB(Q6))  return GOF(Q6);
+   if (o >= GOF(Q7)   && o+sz <= GOF(Q7) +SZB(Q7))  return GOF(Q7);
+   if (o >= GOF(Q8)   && o+sz <= GOF(Q8) +SZB(Q8))  return GOF(Q8);
+   if (o >= GOF(Q9)   && o+sz <= GOF(Q9) +SZB(Q9))  return GOF(Q9);
+   if (o >= GOF(Q10)  && o+sz <= GOF(Q10)+SZB(Q10)) return GOF(Q10);
+   if (o >= GOF(Q11)  && o+sz <= GOF(Q11)+SZB(Q11)) return GOF(Q11);
+   if (o >= GOF(Q12)  && o+sz <= GOF(Q12)+SZB(Q12)) return GOF(Q12);
+   if (o >= GOF(Q13)  && o+sz <= GOF(Q13)+SZB(Q13)) return GOF(Q13);
+   if (o >= GOF(Q14)  && o+sz <= GOF(Q14)+SZB(Q14)) return GOF(Q14);
+   if (o >= GOF(Q15)  && o+sz <= GOF(Q15)+SZB(Q15)) return GOF(Q15);
+   if (o >= GOF(Q16)  && o+sz <= GOF(Q16)+SZB(Q16)) return GOF(Q16);
+   if (o >= GOF(Q17)  && o+sz <= GOF(Q17)+SZB(Q17)) return GOF(Q17);
+   if (o >= GOF(Q18)  && o+sz <= GOF(Q18)+SZB(Q18)) return GOF(Q18);
+   if (o >= GOF(Q19)  && o+sz <= GOF(Q19)+SZB(Q19)) return GOF(Q19);
+   if (o >= GOF(Q20)  && o+sz <= GOF(Q20)+SZB(Q20)) return GOF(Q20);
+   if (o >= GOF(Q21)  && o+sz <= GOF(Q21)+SZB(Q21)) return GOF(Q21);
+   if (o >= GOF(Q22)  && o+sz <= GOF(Q22)+SZB(Q22)) return GOF(Q22);
+   if (o >= GOF(Q23)  && o+sz <= GOF(Q23)+SZB(Q23)) return GOF(Q23);
+   if (o >= GOF(Q24)  && o+sz <= GOF(Q24)+SZB(Q24)) return GOF(Q24);
+   if (o >= GOF(Q25)  && o+sz <= GOF(Q25)+SZB(Q25)) return GOF(Q25);
+   if (o >= GOF(Q26)  && o+sz <= GOF(Q26)+SZB(Q26)) return GOF(Q26);
+   if (o >= GOF(Q27)  && o+sz <= GOF(Q27)+SZB(Q27)) return GOF(Q27);
+   if (o >= GOF(Q28)  && o+sz <= GOF(Q28)+SZB(Q28)) return GOF(Q28);
+   if (o >= GOF(Q29)  && o+sz <= GOF(Q29)+SZB(Q29)) return GOF(Q29);
+   if (o >= GOF(Q30)  && o+sz <= GOF(Q30)+SZB(Q30)) return GOF(Q30);
+   if (o >= GOF(Q31)  && o+sz <= GOF(Q31)+SZB(Q31)) return GOF(Q31);
+
+   if (o == GOF(FPCR) && sz == 4) return -1; // untracked
+   if (o == GOF(QCFLAG) && sz == 16) return o;
+
+   if (o == GOF(CMSTART) && sz == 8) return -1; // untracked
+   if (o == GOF(CMLEN)   && sz == 8) return -1; // untracked
 
    VG_(printf)("MC_(get_otrack_shadow_offset)(arm64)(off=%d,sz=%d)\n",
                offset,szB);
@@ -1054,8 +1101,8 @@ static Int get_otrack_shadow_offset_wrk ( Int offset, Int szB )
    if (o == GOF(ULR) && sz == 4) return -1;
 
    if (o == GOF(EMNOTE)     && sz == 4) return -1; /* slot unused */
-   if (o == GOF(TISTART)     && sz == 4) return -1; /* slot unused */
-   if (o == GOF(TILEN)     && sz == 4) return -1; /* slot unused */
+   if (o == GOF(CMSTART)     && sz == 4) return -1; /* slot unused */
+   if (o == GOF(CMLEN)     && sz == 4) return -1; /* slot unused */
    if (o == GOF(NRADDR)     && sz == 4) return -1; /* slot unused */
 
    if (o >= GOF(f0)  && o+sz <= GOF(f0) +SZB(f0))  return GOF(f0);
@@ -1142,8 +1189,8 @@ static Int get_otrack_shadow_offset_wrk ( Int offset, Int szB )
    if (o == GOF(ULR)  && sz == 8) return o;
 
    if (o == GOF(EMNOTE)  && sz == 4) return -1;  /* slot unused */
-   if (o == GOF(TISTART) && sz == 4) return -1;  /* slot unused */
-   if (o == GOF(TILEN)   && sz == 4) return -1;  /* slot unused */
+   if (o == GOF(CMSTART) && sz == 4) return -1;  /* slot unused */
+   if (o == GOF(CMLEN)   && sz == 4) return -1;  /* slot unused */
    if (o == GOF(NRADDR)  && sz == 4) return -1;  /* slot unused */
 
    if (o >= GOF(f0)  && o+sz <= GOF(f0) +SZB(f0))  return GOF(f0);
@@ -1187,6 +1234,38 @@ static Int get_otrack_shadow_offset_wrk ( Int offset, Int szB )
 #  undef GOF
 #  undef SZB
 
+   /* --------------------- tilegx --------------------- */
+#  elif defined(VGA_tilegx)
+
+#  define GOF(_fieldname) \
+      (offsetof(VexGuestTILEGXState,guest_##_fieldname))
+#  define SZB(_fieldname) \
+      (sizeof(((VexGuestTILEGXState*)0)->guest_##_fieldname))
+
+   Int  o     = offset;
+   Int  sz    = szB;
+   Bool is1248 = sz == 8 || sz == 4 || sz == 2 || sz == 1;
+
+   tl_assert(sz > 0);
+   tl_assert(host_is_little_endian());
+
+   if (o >= GOF(r0) && is1248 && o <= (GOF(r63) + 8 - sz))
+      return GOF(r0) + ((o-GOF(r0)) & -8) ;
+
+   if (o == GOF(pc)  && sz == 8) return o;
+   if (o == GOF(EMNOTE)  && sz == 8) return o;
+   if (o == GOF(CMSTART)  && sz == 8) return o;
+   if (o == GOF(CMLEN)  && sz == 8) return o;
+   if (o == GOF(NRADDR)  && sz == 8) return o;
+   if (o == GOF(cmpexch) && sz == 8) return o;
+   if (o == GOF(zero)  && sz == 8) return o;
+
+   VG_(printf)("MC_(get_otrack_shadow_offset)(tilegx)(off=%d,sz=%d)\n",
+               offset,szB);
+   tl_assert(0);
+#  undef GOF
+#  undef SZB
+
 #  else
 #    error "FIXME: not implemented for this architecture"
 #  endif
@@ -1207,7 +1286,7 @@ static Int get_otrack_shadow_offset_wrk ( Int offset, Int szB )
 IRType MC_(get_otrack_reg_array_equiv_int_type) ( IRRegArray* arr )
 {
    /* -------------------- ppc64 -------------------- */
-#  if defined(VGA_ppc64)
+#  if defined(VGA_ppc64be) || defined(VGA_ppc64le)
    /* The redir stack. */
    if (arr->base == offsetof(VexGuestPPC64State,guest_REDIR_STACK[0])
        && arr->elemTy == Ity_I64
@@ -1301,6 +1380,14 @@ IRType MC_(get_otrack_reg_array_equiv_int_type) ( IRRegArray* arr )
    ppIRRegArray(arr);
    VG_(printf)("\n");
    tl_assert(0);
+
+   /* --------------------- tilegx --------------------- */
+#  elif defined(VGA_tilegx)
+   VG_(printf)("get_reg_array_equiv_int_type(tilegx): unhandled: ");
+   ppIRRegArray(arr);
+   VG_(printf)("\n");
+   tl_assert(0);
+
 #  else
 #    error "FIXME: not implemented for this architecture"
 #  endif

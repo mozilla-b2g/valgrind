@@ -61,14 +61,14 @@
 #include "pub_core_basics.h"
 #include "pub_core_debuglog.h"
 #include "pub_core_vki.h"
-#include "pub_core_vkiscnums.h"    // __NR_sched_yield
-#include "pub_core_libcsetjmp.h"   // to keep _threadstate.h happy
+#include "pub_core_vkiscnums.h"  // __NR_sched_yield
 #include "pub_core_threadstate.h"
+#include "pub_core_clientstate.h"
 #include "pub_core_aspacemgr.h"
-#include "pub_core_clreq.h"         // for VG_USERREQ__*
+#include "pub_core_clreq.h"      // for VG_USERREQ__*
 #include "pub_core_dispatch.h"
-#include "pub_core_errormgr.h"      // For VG_(get_n_errs_found)()
-#include "pub_core_gdbserver.h"     // for VG_(gdbserver) and VG_(gdbserver_activity)
+#include "pub_core_errormgr.h"   // For VG_(get_n_errs_found)()
+#include "pub_core_gdbserver.h"  // for VG_(gdbserver)/VG_(gdbserver_activity)
 #include "pub_core_libcbase.h"
 #include "pub_core_libcassert.h"
 #include "pub_core_libcprint.h"
@@ -198,7 +198,8 @@ static
 const HChar* name_of_sched_event ( UInt event )
 {
    switch (event) {
-      case VEX_TRC_JMP_TINVAL:         return "TINVAL";
+      case VEX_TRC_JMP_INVALICACHE:    return "INVALICACHE";
+      case VEX_TRC_JMP_FLUSHDCACHE:    return "FLUSHDCACHE";
       case VEX_TRC_JMP_NOREDIR:        return "NOREDIR";
       case VEX_TRC_JMP_SIGILL:         return "SIGILL";
       case VEX_TRC_JMP_SIGTRAP:        return "SIGTRAP";
@@ -240,14 +241,14 @@ ThreadId VG_(alloc_ThreadState) ( void )
 	 VG_(threads)[i].status = VgTs_Init;
 	 VG_(threads)[i].exitreason = VgSrc_None;
          if (VG_(threads)[i].thread_name)
-            VG_(arena_free)(VG_AR_CORE, VG_(threads)[i].thread_name);
+            VG_(free)(VG_(threads)[i].thread_name);
          VG_(threads)[i].thread_name = NULL;
          return i;
       }
    }
-   VG_(printf)("vg_alloc_ThreadState: no free slots available\n");
-   VG_(printf)("Increase VG_N_THREADS, rebuild and try again.\n");
-   VG_(core_panic)("VG_N_THREADS is too low");
+   VG_(printf)("Use --max-threads=INT to specify a larger number of threads\n"
+               "and rerun valgrind\n");
+   VG_(core_panic)("Max number of threads is too low");
    /*NOTREACHED*/
 }
 
@@ -265,8 +266,7 @@ void VG_(acquire_BigLock)(ThreadId tid, const HChar* who)
 
 #if 0
    if (VG_(clo_trace_sched)) {
-      HChar buf[100];
-      vg_assert(VG_(strlen)(who) <= 100-50);
+      HChar buf[VG_(strlen)(who) + 30];
       VG_(sprintf)(buf, "waiting for lock (%s)", who);
       print_sched_event(tid, buf);
    }
@@ -296,8 +296,7 @@ void VG_(acquire_BigLock)(ThreadId tid, const HChar* who)
    }
 
    if (VG_(clo_trace_sched)) {
-      HChar buf[150];
-      vg_assert(VG_(strlen)(who) <= 150-50);
+      HChar buf[VG_(strlen)(who) + 30];
       VG_(sprintf)(buf, " acquired lock (%s)", who);
       print_sched_event(tid, buf);
    }
@@ -326,10 +325,9 @@ void VG_(release_BigLock)(ThreadId tid, ThreadStatus sleepstate,
    VG_(running_tid) = VG_INVALID_THREADID;
 
    if (VG_(clo_trace_sched)) {
-      HChar buf[200];
-      vg_assert(VG_(strlen)(who) <= 200-100);
-      VG_(sprintf)(buf, "releasing lock (%s) -> %s",
-                        who, VG_(name_of_ThreadStatus)(sleepstate));
+      const HChar *status = VG_(name_of_ThreadStatus)(sleepstate);
+      HChar buf[VG_(strlen)(who) + VG_(strlen)(status) + 30];
+      VG_(sprintf)(buf, "releasing lock (%s) -> %s", who, status);
       print_sched_event(tid, buf);
    }
 
@@ -618,7 +616,7 @@ ThreadId VG_(scheduler_init_phase1) ( void )
 
       VG_(threads)[i].status                    = VgTs_Empty;
       VG_(threads)[i].client_stack_szB          = 0;
-      VG_(threads)[i].client_stack_highest_word = (Addr)NULL;
+      VG_(threads)[i].client_stack_highest_byte = (Addr)NULL;
       VG_(threads)[i].err_disablement_level     = 0;
       VG_(threads)[i].thread_name               = NULL;
    }
@@ -654,8 +652,8 @@ void VG_(scheduler_init_phase2) ( ThreadId tid_main,
    vg_assert(VG_IS_PAGE_ALIGNED(clstack_end+1));
    vg_assert(VG_IS_PAGE_ALIGNED(clstack_size));
 
-   VG_(threads)[tid_main].client_stack_highest_word 
-      = clstack_end + 1 - sizeof(UWord);
+   VG_(threads)[tid_main].client_stack_highest_byte 
+      = clstack_end;
    VG_(threads)[tid_main].client_stack_szB 
       = clstack_size;
 
@@ -692,9 +690,9 @@ void VG_(scheduler_init_phase2) ( ThreadId tid_main,
    layout requirements.  See libvex.h for details, but in short the
    requirements are: There must be no holes in between the primary
    guest state, its two copies, and the spill area.  In short, all 4
-   areas must have a 16-aligned size and be 16-aligned, and placed
-   back-to-back. */
-static void do_pre_run_checks ( ThreadState* tst )
+   areas must be aligned on the LibVEX_GUEST_STATE_ALIGN boundary and 
+   be placed back-to-back without holes in between. */
+static void do_pre_run_checks ( volatile ThreadState* tst )
 {
    Addr a_vex     = (Addr) & tst->arch.vex;
    Addr a_vexsh1  = (Addr) & tst->arch.vex_shadow1;
@@ -713,15 +711,15 @@ static void do_pre_run_checks ( ThreadState* tst )
                (void*)a_vexsh2, sz_vexsh2,
                (void*)a_spill, sz_spill );
 
-   vg_assert(VG_IS_16_ALIGNED(sz_vex));
-   vg_assert(VG_IS_16_ALIGNED(sz_vexsh1));
-   vg_assert(VG_IS_16_ALIGNED(sz_vexsh2));
-   vg_assert(VG_IS_16_ALIGNED(sz_spill));
+   vg_assert(sz_vex    % LibVEX_GUEST_STATE_ALIGN == 0);
+   vg_assert(sz_vexsh1 % LibVEX_GUEST_STATE_ALIGN == 0);
+   vg_assert(sz_vexsh2 % LibVEX_GUEST_STATE_ALIGN == 0);
+   vg_assert(sz_spill  % LibVEX_GUEST_STATE_ALIGN == 0);
 
-   vg_assert(VG_IS_16_ALIGNED(a_vex));
-   vg_assert(VG_IS_16_ALIGNED(a_vexsh1));
-   vg_assert(VG_IS_16_ALIGNED(a_vexsh2));
-   vg_assert(VG_IS_16_ALIGNED(a_spill));
+   vg_assert(a_vex    % LibVEX_GUEST_STATE_ALIGN == 0);
+   vg_assert(a_vexsh1 % LibVEX_GUEST_STATE_ALIGN == 0);
+   vg_assert(a_vexsh2 % LibVEX_GUEST_STATE_ALIGN == 0);
+   vg_assert(a_spill  % LibVEX_GUEST_STATE_ALIGN == 0);
 
    /* Check that the guest state and its two shadows have the same
       size, and that there are no holes in between.  The latter is
@@ -767,7 +765,7 @@ static void do_pre_run_checks ( ThreadState* tst )
    vg_assert(VG_IS_8_ALIGNED(offsetof(VexGuestAMD64State,guest_RIP)));
 #  endif
 
-#  if defined(VGA_ppc32) || defined(VGA_ppc64)
+#  if defined(VGA_ppc32) || defined(VGA_ppc64be) || defined(VGA_ppc64le)
    /* ppc guest_state vector regs must be 16 byte aligned for
       loads/stores.  This is important! */
    vg_assert(VG_IS_16_ALIGNED(& tst->arch.vex.guest_VSR0));
@@ -857,7 +855,7 @@ void run_thread_for_a_while ( /*OUT*/HWord* two_words,
    vg_assert(*dispatchCtrP > 0);
 
    tst = VG_(get_ThreadState)(tid);
-   do_pre_run_checks( (ThreadState*)tst );
+   do_pre_run_checks( tst );
    /* end Paranoia */
 
    /* Futz with the XIndir stats counters. */
@@ -877,7 +875,7 @@ void run_thread_for_a_while ( /*OUT*/HWord* two_words,
       if (LIKELY(VG_(tt_fast)[cno].guest == (Addr)tst->arch.vex.VG_INSTR_PTR))
          host_code_addr = VG_(tt_fast)[cno].host;
       else {
-         AddrH res   = 0;
+         Addr res = 0;
          /* not found in VG_(tt_fast). Searching here the transtab
             improves the performance compared to returning directly
             to the scheduler. */
@@ -932,7 +930,7 @@ void run_thread_for_a_while ( /*OUT*/HWord* two_words,
       jumped, 
       VG_(disp_run_translations)( 
          two_words,
-         (void*)&tst->arch.vex,
+         (volatile void*)&tst->arch.vex,
          host_code_addr
       )
    );
@@ -962,7 +960,24 @@ void run_thread_for_a_while ( /*OUT*/HWord* two_words,
    vg_assert(tst->arch.vex.host_EvC_FAILADDR
              == (HWord)VG_(fnptr_to_fnentry)( &VG_(disp_cp_evcheck_fail)) );
 
-   done_this_time = *dispatchCtrP - ((Int)tst->arch.vex.host_EvC_COUNTER + 1);
+   /* The number of events done this time is the difference between
+      the event counter originally and what it is now.  Except -- if
+      it has gone negative (to -1) then the transition 0 to -1 doesn't
+      correspond to a real executed block, so back it out.  It's like
+      this because the event checks decrement the counter first and
+      check it for negativeness second, hence the 0 to -1 transition
+      causes a bailout and the block it happens in isn't executed. */
+   {
+     Int dispatchCtrAfterwards = (Int)tst->arch.vex.host_EvC_COUNTER;
+     done_this_time = *dispatchCtrP - dispatchCtrAfterwards;
+     if (dispatchCtrAfterwards == -1) {
+        done_this_time--;
+     } else {
+        /* If the generated code drives the counter below -1, something
+           is seriously wrong. */
+        vg_assert(dispatchCtrAfterwards >= 0);
+     }
+   }
 
    vg_assert(done_this_time >= 0);
    bbs_done += (ULong)done_this_time;
@@ -1032,8 +1047,8 @@ void handle_chain_me ( ThreadId tid, void* place_to_chain, Bool toFastEP )
 {
    Bool found          = False;
    Addr ip             = VG_(get_IP)(tid);
-   UInt to_sNo         = (UInt)-1;
-   UInt to_tteNo       = (UInt)-1;
+   SECno to_sNo         = INV_SNO;
+   TTEno to_tteNo       = INV_TTE;
 
    found = VG_(search_transtab)( NULL, &to_sNo, &to_tteNo,
                                  ip, False/*dont_upd_fast_cache*/ );
@@ -1054,8 +1069,8 @@ void handle_chain_me ( ThreadId tid, void* place_to_chain, Bool toFastEP )
       }
    }
    vg_assert(found);
-   vg_assert(to_sNo != -1);
-   vg_assert(to_tteNo != -1);
+   vg_assert(to_sNo != INV_SNO);
+   vg_assert(to_tteNo != INV_TTE);
 
    /* So, finally we know where to patch through to.  Do the patching
       and update the various admin tables that allow it to be undone
@@ -1074,13 +1089,21 @@ static void handle_syscall(ThreadId tid, UInt trc)
       runnable again.  We could take a signal while the
       syscall runs. */
 
-   if (VG_(clo_sanity_level >= 3))
-      VG_(am_do_sync_check)("(BEFORE SYSCALL)",__FILE__,__LINE__);
+   if (VG_(clo_sanity_level) >= 3) {
+      HChar buf[50];    // large enough
+      VG_(sprintf)(buf, "(BEFORE SYSCALL, tid %d)", tid);
+      Bool ok = VG_(am_do_sync_check)(buf, __FILE__, __LINE__);
+      vg_assert(ok);
+   }
 
    SCHEDSETJMP(tid, jumped, VG_(client_syscall)(tid, trc));
 
-   if (VG_(clo_sanity_level >= 3))
-      VG_(am_do_sync_check)("(AFTER SYSCALL)",__FILE__,__LINE__);
+   if (VG_(clo_sanity_level) >= 3) {
+      HChar buf[50];    // large enough
+      VG_(sprintf)(buf, "(AFTER SYSCALL, tid %d)", tid);
+      Bool ok = VG_(am_do_sync_check)(buf, __FILE__, __LINE__);
+      vg_assert(ok);
+   }
 
    if (!VG_(is_running_thread)(tid))
       VG_(printf)("tid %d not running; VG_(running_tid)=%d, tid %d status %d\n",
@@ -1104,7 +1127,7 @@ void handle_noredir_jump ( /*OUT*/HWord* two_words,
    /* Clear return area. */
    two_words[0] = two_words[1] = 0;
 
-   AddrH hcode = 0;
+   Addr  hcode = 0;
    Addr  ip    = VG_(get_IP)(tid);
 
    Bool  found = VG_(search_unredir_transtab)( &hcode, ip );
@@ -1201,6 +1224,30 @@ VgSchedReturnCode VG_(scheduler) ( ThreadId tid )
       }
    }
 
+   if (SimHintiS(SimHint_no_nptl_pthread_stackcache, VG_(clo_sim_hints))
+       && tid != 1) {
+      /* We disable the stack cache the first time we see a thread other
+         than the main thread appearing. At this moment, we are sure the pthread
+         lib loading is done/variable was initialised by pthread lib/... */
+      if (VG_(client__stack_cache_actsize__addr)) {
+         if (*VG_(client__stack_cache_actsize__addr) == 0) {
+            VG_(debugLog)(1,"sched",
+                          "pthread stack cache size disable done"
+                          " via kludge\n");
+            *VG_(client__stack_cache_actsize__addr) = 1000 * 1000 * 1000;
+            /* Set a value big enough to be above the hardcoded maximum stack
+               cache size in glibc, small enough to allow a pthread stack size
+               to be added without risk of overflow. */
+         }
+      } else {
+          VG_(debugLog)(0,"sched",
+                        "WARNING: pthread stack cache cannot be disabled!\n");
+          VG_(clo_sim_hints) &= ~SimHint2S(SimHint_no_nptl_pthread_stackcache);
+          /* Remove SimHint_no_nptl_pthread_stackcache from VG_(clo_sim_hints)
+             to avoid having a msg for all following threads. */
+      }
+   }
+
    /* set the proper running signal mask */
    block_signals();
    
@@ -1251,14 +1298,7 @@ VgSchedReturnCode VG_(scheduler) ( ThreadId tid )
 	 /* For stats purposes only. */
 	 n_scheduling_events_MAJOR++;
 
-	 /* Figure out how many bbs to ask vg_run_innerloop to do.  Note
-	    that it decrements the counter before testing it for zero, so
-	    that if tst->dispatch_ctr is set to N you get at most N-1
-	    iterations.  Also this means that tst->dispatch_ctr must
-	    exceed zero before entering the innerloop.  Also also, the
-	    decrement is done before the bb is actually run, so you
-	    always get at least one decrement even if nothing happens. */
-         // FIXME is this right?
+	 /* Figure out how many bbs to ask vg_run_innerloop to do. */
          dispatch_ctr = SCHEDULING_QUANTUM;
 
 	 /* paranoia ... */
@@ -1279,8 +1319,9 @@ VgSchedReturnCode VG_(scheduler) ( ThreadId tid )
                               tid, 0/*ignored*/, False );
 
       if (VG_(clo_trace_sched) && VG_(clo_verbosity) > 2) {
-	 HChar buf[50];
-	 VG_(sprintf)(buf, "TRC: %s", name_of_sched_event(trc[0]));
+         const HChar *name = name_of_sched_event(trc[0]);
+         HChar buf[VG_(strlen)(name) + 10];    // large enough
+	 VG_(sprintf)(buf, "TRC: %s", name);
 	 print_sched_event(tid, buf);
       }
 
@@ -1303,6 +1344,18 @@ VgSchedReturnCode VG_(scheduler) ( ThreadId tid )
             next block to be executed should be no-redir.  Then we can
             suspend and resume at any point, which isn't the case at
             the moment. */
+         /* We can't enter a no-redir translation with the dispatch
+            ctr set to zero, for the reasons commented just above --
+            we need to force it to execute right now.  So, if the
+            dispatch ctr is zero, set it to one.  Note that this would
+            have the bad side effect of holding the Big Lock arbitrary
+            long should there be an arbitrarily long sequence of
+            back-to-back no-redir translations to run.  But we assert
+            just below that this translation cannot request another
+            no-redir jump, so we should be safe against that. */
+         if (dispatch_ctr == 0) {
+            dispatch_ctr = 1;
+         }
          handle_noredir_jump( &trc[0], 
                               &dispatch_ctr,
                               tid );
@@ -1314,6 +1367,8 @@ VgSchedReturnCode VG_(scheduler) ( ThreadId tid )
             can, since handle_noredir_jump will assert if the counter
             is zero on entry. */
          vg_assert(trc[0] != VG_TRC_INNER_COUNTERZERO);
+         /* This asserts the same thing. */
+         vg_assert(dispatch_ctr >= 0);
 
          /* A no-redir translation can't return with a chain-me
             request, since chaining in the no-redir cache is too
@@ -1331,7 +1386,7 @@ VgSchedReturnCode VG_(scheduler) ( ThreadId tid )
          break;
 
       case VG_TRC_INNER_FASTMISS:
-	 vg_assert(dispatch_ctr > 0);
+	 vg_assert(dispatch_ctr >= 0);
 	 handle_tt_miss(tid);
 	 break;
 
@@ -1368,7 +1423,7 @@ VgSchedReturnCode VG_(scheduler) ( ThreadId tid )
             before swapping to another.  That means that short term
             spins waiting for hardware to poke memory won't cause a
             thread swap. */
-	 if (dispatch_ctr > 1000) 
+         if (dispatch_ctr > 1000)
             dispatch_ctr = 1000;
 	 break;
 
@@ -1466,21 +1521,20 @@ VgSchedReturnCode VG_(scheduler) ( ThreadId tid )
             VG_(umsg)(
                "valgrind: Unrecognised instruction at address %#lx.\n", addr);
             VG_(get_and_pp_StackTrace)(tid, VG_(clo_backtrace_size));
-#define M(a) VG_(umsg)(a "\n");
-   M("Your program just tried to execute an instruction that Valgrind" );
-   M("did not recognise.  There are two possible reasons for this."    );
-   M("1. Your program has a bug and erroneously jumped to a non-code"  );
-   M("   location.  If you are running Memcheck and you just saw a"    );
-   M("   warning about a bad jump, it's probably your program's fault.");
-   M("2. The instruction is legitimate but Valgrind doesn't handle it,");
-   M("   i.e. it's Valgrind's fault.  If you think this is the case or");
-   M("   you are not sure, please let us know and we'll try to fix it.");
-   M("Either way, Valgrind will now raise a SIGILL signal which will"  );
-   M("probably kill your program."                                     );
-#undef M
+#        define M(a) VG_(umsg)(a "\n");
+         M("Your program just tried to execute an instruction that Valgrind" );
+         M("did not recognise.  There are two possible reasons for this."    );
+         M("1. Your program has a bug and erroneously jumped to a non-code"  );
+         M("   location.  If you are running Memcheck and you just saw a"    );
+         M("   warning about a bad jump, it's probably your program's fault.");
+         M("2. The instruction is legitimate but Valgrind doesn't handle it,");
+         M("   i.e. it's Valgrind's fault.  If you think this is the case or");
+         M("   you are not sure, please let us know and we'll try to fix it.");
+         M("Either way, Valgrind will now raise a SIGILL signal which will"  );
+         M("probably kill your program."                                     );
+#        undef M
          }
-
-#if defined(VGA_s390x)
+#        if defined(VGA_s390x)
          /* Now that the complaint is out we need to adjust the guest_IA. The
             reason is that -- after raising the exception -- execution will
             continue with the insn that follows the invalid insn. As the first
@@ -1492,21 +1546,29 @@ VgSchedReturnCode VG_(scheduler) ( ThreadId tid )
          UChar byte = ((UChar *)addr)[0];
          UInt  insn_length = ((((byte >> 6) + 1) >> 1) + 1) << 1;
          Addr  next_insn_addr = addr + insn_length;
-
          VG_(set_IP)(tid, next_insn_addr);
-#endif
+#        endif
          VG_(synth_sigill)(tid, addr);
          break;
       }
-      case VEX_TRC_JMP_TINVAL:
+
+      case VEX_TRC_JMP_INVALICACHE:
          VG_(discard_translations)(
-            (Addr64)VG_(threads)[tid].arch.vex.guest_TISTART,
-            VG_(threads)[tid].arch.vex.guest_TILEN,
-            "scheduler(VEX_TRC_JMP_TINVAL)"
+            (Addr)VG_(threads)[tid].arch.vex.guest_CMSTART,
+            VG_(threads)[tid].arch.vex.guest_CMLEN,
+            "scheduler(VEX_TRC_JMP_INVALICACHE)"
          );
          if (0)
             VG_(printf)("dump translations done.\n");
          break;
+
+      case VEX_TRC_JMP_FLUSHDCACHE: {
+         void* start = (void*)VG_(threads)[tid].arch.vex.guest_CMSTART;
+         SizeT len   = VG_(threads)[tid].arch.vex.guest_CMLEN;
+         VG_(debugLog)(2, "sched", "flush_dcache(%p, %lu)\n", start, len);
+         VG_(flush_dcache)(start, len);
+         break;
+      }
 
       case VG_TRC_INVARIANT_FAILED:
          /* This typically happens if, after running generated code,
@@ -1606,7 +1668,7 @@ void VG_(nuke_all_threads_except) ( ThreadId me, VgSchedReturnCode src )
 #elif defined(VGA_amd64)
 #  define VG_CLREQ_ARGS       guest_RAX
 #  define VG_CLREQ_RET        guest_RDX
-#elif defined(VGA_ppc32) || defined(VGA_ppc64)
+#elif defined(VGA_ppc32) || defined(VGA_ppc64be) || defined(VGA_ppc64le)
 #  define VG_CLREQ_ARGS       guest_GPR4
 #  define VG_CLREQ_RET        guest_GPR3
 #elif defined(VGA_arm)
@@ -1619,6 +1681,9 @@ void VG_(nuke_all_threads_except) ( ThreadId me, VgSchedReturnCode src )
 #  define VG_CLREQ_ARGS       guest_r2
 #  define VG_CLREQ_RET        guest_r3
 #elif defined(VGA_mips32) || defined(VGA_mips64)
+#  define VG_CLREQ_ARGS       guest_r12
+#  define VG_CLREQ_RET        guest_r11
+#elif defined(VGA_tilegx)
 #  define VG_CLREQ_ARGS       guest_r12
 #  define VG_CLREQ_RET        guest_r11
 #else
@@ -1760,7 +1825,7 @@ void do_client_request ( ThreadId tid )
    switch (req_no) {
 
       case VG_USERREQ__CLIENT_CALL0: {
-         UWord (*f)(ThreadId) = (void*)arg[1];
+         UWord (*f)(ThreadId) = (__typeof__(f))arg[1];
 	 if (f == NULL)
 	    VG_(message)(Vg_DebugMsg, "VG_USERREQ__CLIENT_CALL0: func=%p\n", f);
 	 else
@@ -1768,7 +1833,7 @@ void do_client_request ( ThreadId tid )
          break;
       }
       case VG_USERREQ__CLIENT_CALL1: {
-         UWord (*f)(ThreadId, UWord) = (void*)arg[1];
+         UWord (*f)(ThreadId, UWord) = (__typeof__(f))arg[1];
 	 if (f == NULL)
 	    VG_(message)(Vg_DebugMsg, "VG_USERREQ__CLIENT_CALL1: func=%p\n", f);
 	 else
@@ -1776,7 +1841,7 @@ void do_client_request ( ThreadId tid )
          break;
       }
       case VG_USERREQ__CLIENT_CALL2: {
-         UWord (*f)(ThreadId, UWord, UWord) = (void*)arg[1];
+         UWord (*f)(ThreadId, UWord, UWord) = (__typeof__(f))arg[1];
 	 if (f == NULL)
 	    VG_(message)(Vg_DebugMsg, "VG_USERREQ__CLIENT_CALL2: func=%p\n", f);
 	 else
@@ -1784,7 +1849,7 @@ void do_client_request ( ThreadId tid )
          break;
       }
       case VG_USERREQ__CLIENT_CALL3: {
-         UWord (*f)(ThreadId, UWord, UWord, UWord) = (void*)arg[1];
+         UWord (*f)(ThreadId, UWord, UWord, UWord) = (__typeof__(f))arg[1];
 	 if (f == NULL)
 	    VG_(message)(Vg_DebugMsg, "VG_USERREQ__CLIENT_CALL3: func=%p\n", f);
 	 else
@@ -1932,25 +1997,25 @@ void do_client_request ( ThreadId tid )
 
       case VG_USERREQ__MAP_IP_TO_SRCLOC: {
          Addr   ip    = arg[1];
-         HChar* buf64 = (HChar*)arg[2];
+         HChar* buf64 = (HChar*)arg[2];  // points to a HChar [64] array
+         const HChar *buf;  // points to a string of unknown size
 
          VG_(memset)(buf64, 0, 64);
          UInt linenum = 0;
          Bool ok = VG_(get_filename_linenum)(
-                      ip, &buf64[0], 50, NULL, 0, NULL, &linenum
+                      ip, &buf, NULL, &linenum
                    );
          if (ok) {
-            /* Find the terminating zero in the first 50 bytes. */
+            /* For backward compatibility truncate the filename to
+               49 characters. */
+            VG_(strncpy)(buf64, buf, 50);
+            buf64[49] = '\0';
             UInt i;
             for (i = 0; i < 50; i++) {
                if (buf64[i] == 0)
                   break;
             }
-            /* We must find a zero somewhere in 0 .. 49.  Else
-               VG_(get_filename_linenum) is not properly zero
-               terminating. */
-            vg_assert(i < 50);
-            VG_(sprintf)(&buf64[i], ":%u", linenum);
+            VG_(sprintf)(buf64+i, ":%u", linenum);  // safe
          } else {
             buf64[0] = 0;
          }
@@ -2101,7 +2166,9 @@ void scheduler_sanity ( ThreadId tid )
          lasttime = now;
          VG_(printf)("\n------------ Sched State at %d ms ------------\n",
                      (Int)now);
-         VG_(show_sched_status)();
+         VG_(show_sched_status)(True,  // host_stacktrace
+                                True,  // stack_usage
+                                True); // exited_threads);
       }
    }
 
@@ -2171,7 +2238,9 @@ void VG_(sanity_check_general) ( Bool force_expensive )
 	 if (remains < limit)
 	    VG_(message)(Vg_DebugMsg, 
                          "WARNING: Thread %d is within %ld bytes "
-                         "of running out of stack!\n",
+                         "of running out of valgrind stack!\n"
+                         "Valgrind stack size can be increased "
+                         "using --valgrind-stacksize=....\n",
 		         tid, remains);
       }
    }

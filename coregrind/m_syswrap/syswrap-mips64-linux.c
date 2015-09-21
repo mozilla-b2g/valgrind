@@ -32,7 +32,6 @@
 #include "pub_core_basics.h"
 #include "pub_core_vki.h"
 #include "pub_core_vkiscnums.h"
-#include "pub_core_libcsetjmp.h"   /* to keep _threadstate.h happy */
 #include "pub_core_threadstate.h"
 #include "pub_core_aspacemgr.h"
 #include "pub_core_debuglog.h"
@@ -48,7 +47,6 @@
 #include "pub_core_syscall.h"
 #include "pub_core_syswrap.h"
 #include "pub_core_tooliface.h"
-#include "pub_core_stacks.h"       /* VG_(register_stack) */
 #include "pub_core_transtab.h"     /* VG_(discard_translations) */
 #include "priv_types_n_macros.h"
 #include "priv_syswrap-generic.h"  /* for decls of generic wrappers */
@@ -205,7 +203,6 @@ static SysRes do_clone ( ThreadId ptid,
    ThreadState * ctst = VG_ (get_ThreadState) (ctid);
    UInt ret = 0;
    UWord * stack;
-   NSegment const *seg;
    SysRes res;
    vki_sigset_t blockall, savedmask;
 
@@ -230,21 +227,8 @@ static SysRes do_clone ( ThreadId ptid,
    ctst->tmp_sig_mask = ptst->sig_mask;
 
    ctst->os_state.threadgroup = ptst->os_state.threadgroup;
-   seg = VG_(am_find_nsegment)((Addr)sp);
 
-   if (seg && seg->kind != SkResvn) {
-      ctst->client_stack_highest_word = sp;
-      ctst->client_stack_szB = ctst->client_stack_highest_word - seg->start;
-      VG_(register_stack)(seg->start, ctst->client_stack_highest_word);
-      if (debug)
-        VG_(printf)("tid %d: guessed client stack range %#lx-%#lx\n",
-                    ctid, seg->start, sp /* VG_PGROUNDUP (sp) */ );
-   } else {
-      VG_(message)(Vg_UserMsg,
-                    "!? New thread %d starts with sp+%#lx) unmapped\n",
-                    ctid, sp);
-      ctst->client_stack_szB = 0;
-   }
+   ML_(guess_and_register_stack) (sp, ctst);
 
    VG_TRACK(pre_thread_ll_create, ptid, ctid);
    if (flags & VKI_CLONE_SETTLS) {
@@ -401,7 +385,7 @@ PRE(sys_cacheflush)
    PRINT("cacheflush (%lx, %lx, %lx)", ARG1, ARG2, ARG3);
    PRE_REG_READ3(long, "cacheflush", unsigned long, addr,
                  int, nbytes, int, cache);
-   VG_ (discard_translations) ((Addr64) ARG1, ((ULong) ARG2),
+   VG_ (discard_translations) ((Addr)ARG1, (ULong) ARG2,
                                "PRE(sys_cacheflush)");
    SET_STATUS_Success(0);
 }
@@ -796,7 +780,7 @@ static SyscallTableEntry syscall_main_table[] = {
    GENX_ (__NR_mlockall, sys_mlockall),
    LINX_ (__NR_munlockall, sys_munlockall),
    LINX_ (__NR_vhangup, sys_vhangup),
-   /* GENX_(__NR_pivot_root,sys_pivot_root), */
+   LINX_ (__NR_pivot_root,sys_pivot_root),
    LINXY (__NR__sysctl, sys_sysctl),
    LINXY (__NR_prctl, sys_prctl),
    LINXY (__NR_adjtimex, sys_adjtimex),
@@ -923,7 +907,10 @@ static SyscallTableEntry syscall_main_table[] = {
    LINXY (__NR_prlimit64, sys_prlimit64),
    LINXY (__NR_clock_adjtime, sys_clock_adjtime),
    LINXY (__NR_process_vm_readv, sys_process_vm_readv),
-   LINX_ (__NR_process_vm_writev, sys_process_vm_writev)
+   LINX_ (__NR_process_vm_writev, sys_process_vm_writev),
+   LINXY(__NR_getrandom, sys_getrandom),
+   LINXY(__NR_memfd_create, sys_memfd_create),
+   LINX_(__NR_syncfs, sys_syncfs)
 };
 
 SyscallTableEntry * ML_(get_linux_syscall_entry) ( UInt sysno )

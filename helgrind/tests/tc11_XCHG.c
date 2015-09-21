@@ -14,10 +14,11 @@
 #undef PLAT_x86_linux
 #undef PLAT_amd64_linux
 #undef PLAT_ppc32_linux
-#undef PLAT_ppc64_linux
+#undef PLAT_ppc64be_linux
 #undef PLAT_arm_linux
 #undef PLAT_s390x_linux
 #undef PLAT_mips32_linux
+#undef PLAT_tilegx_linux
 
 #if defined(__APPLE__) && defined(__i386__)
 #  define PLAT_x86_darwin 1
@@ -31,12 +32,16 @@
 #  define PLAT_ppc32_linux 1
 #elif defined(__linux__) && defined(__powerpc__) && defined(__powerpc64__)
 #  define PLAT_ppc64_linux 1
-#elif defined(__linux__) && defined(__arm__)
+#elif defined(__linux__) && defined(__arm__) && !defined(__aarch64__)
 #  define PLAT_arm_linux 1
+#elif defined(__linux__) && defined(__aarch64__) && !defined(__arm__)
+#  define PLAT_arm64_linux 1
 #elif defined(__linux__) && defined(__s390x__)
 #  define PLAT_s390x_linux 1
 #elif defined(__linux__) && defined(__mips__)
 #  define PLAT_mips32_linux 1
+#elif defined(__linux__) && defined(__tilegx__)
+#  define PLAT_tilegx_linux 1
 #endif
 
 
@@ -91,7 +96,7 @@
       XCHG_M_R(_addr,_lval)
 
 #elif defined(PLAT_ppc32_linux) || defined(PLAT_ppc64_linux) \
-      || defined(PLAT_arm_linux)
+      || defined(PLAT_arm_linux) || defined(PLAT_arm64_linux)
 #  if defined(HAVE_BUILTIN_ATOMIC)
 #    define XCHG_M_R(_addr,_lval)                                           \
         do {                                                                \
@@ -113,6 +118,12 @@
 #  define XCHG_M_R_with_redundant_LOCK(_addr,_lval) \
       XCHG_M_R(_addr,_lval)
 
+#elif defined(PLAT_tilegx_linux)
+#  define XCHG_M_R(_addr,_lval) \
+  _lval = __insn_exch4(&_addr, _lval)
+
+#  define XCHG_M_R_with_redundant_LOCK(_addr,_lval) \
+  XCHG_M_R(_addr, _lval)
 #else
 #  error "Unsupported architecture"
 

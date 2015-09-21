@@ -85,6 +85,7 @@
 #define VKI_XEN_DOMCTL_setnodeaffinity               68
 #define VKI_XEN_DOMCTL_getnodeaffinity               69
 #define VKI_XEN_DOMCTL_set_max_evtchn                70
+#define VKI_XEN_DOMCTL_cacheflush                    71
 #define VKI_XEN_DOMCTL_gdbsx_guestmemio            1000
 #define VKI_XEN_DOMCTL_gdbsx_pausevcpu             1001
 #define VKI_XEN_DOMCTL_gdbsx_unpausevcpu           1002
@@ -260,8 +261,18 @@ struct vki_xen_domctl_max_vcpus {
     vki_uint32_t max;           /* maximum number of vcpus */
 };
 
+struct vki_xen_domctl_ioport_permission {
+    vki_uint32_t first_port;              /* IN */
+    vki_uint32_t nr_ports;                /* IN */
+    vki_uint8_t  allow_access;            /* IN */
+};
+
 struct vki_xen_domctl_hypercall_init {
     vki_xen_uint64_aligned_t  gmfn;           /* GMFN to be initialised */
+};
+
+struct vki_xen_domctl_settimeoffset {
+    vki_int32_t time_offset_seconds;
 };
 
 struct vki_xen_domctl_cpuid {
@@ -289,6 +300,14 @@ struct vki_xen_domctl_hvmcontext {
 typedef struct vki_xen_domctl_hvmcontext vki_xen_domctl_hvmcontext_t;
 DEFINE_VKI_XEN_GUEST_HANDLE(vki_xen_domctl_hvmcontext_t);
 
+struct vki_xen_domctl_hvmcontext_partial {
+    vki_uint32_t type; /* IN */
+    vki_uint32_t instance; /* IN */
+    VKI_XEN_GUEST_HANDLE_64(vki_uint8) buffer; /* IN/OUT buffer */
+};
+typedef struct vki_xen_domctl_hvmcontext_partial vki_xen_domctl_hvmcontext_partial_t;
+DEFINE_VKI_XEN_GUEST_HANDLE(vki_xen_domctl_hvmcontext_partial_t);
+
 struct vki_xen_domctl_tsc_info {
     VKI_XEN_GUEST_HANDLE_64(vki_xen_guest_tsc_info_t) out_info; /* OUT */
     vki_xen_guest_tsc_info_t info; /* IN */
@@ -305,8 +324,29 @@ struct vki_xen_domctl_address_size {
     vki_uint32_t size;
 };
 
+struct vki_xen_domctl_debug_op {
+    vki_uint32_t op;   /* IN */
+    vki_uint32_t vcpu; /* IN */
+};
+typedef struct vki_xen_domctl_debug_op vki_xen_domctl_debug_op_t;
+
+struct vki_xen_domctl_mem_event_op {
+    vki_uint32_t op; /* IN */
+    vki_uint32_t mode; /* IN */
+    vki_uint32_t port; /* OUT */
+};
+
+struct vki_xen_domctl_set_access_required {
+    vki_uint8_t access_required; /* IN */
+};
+
 struct vki_xen_domctl_set_max_evtchn {
     vki_uint32_t max_port;
+};
+
+struct vki_xen_domctl_cacheflush {
+    /* IN: page range to flush. */
+    vki_xen_pfn_t start_pfn, nr_pfns;
 };
 
 struct vki_xen_domctl {
@@ -334,15 +374,15 @@ struct vki_xen_domctl {
         //struct vki_xen_domctl_setdebugging      setdebugging;
         //struct vki_xen_domctl_irq_permission    irq_permission;
         //struct vki_xen_domctl_iomem_permission  iomem_permission;
-        //struct vki_xen_domctl_ioport_permission ioport_permission;
+        struct vki_xen_domctl_ioport_permission ioport_permission;
         struct vki_xen_domctl_hypercall_init    hypercall_init;
         //struct vki_xen_domctl_arch_setup        arch_setup;
-        //struct vki_xen_domctl_settimeoffset     settimeoffset;
+        struct vki_xen_domctl_settimeoffset     settimeoffset;
         //struct vki_xen_domctl_disable_migrate   disable_migrate;
         struct vki_xen_domctl_tsc_info          tsc_info;
         //struct vki_xen_domctl_real_mode_area    real_mode_area;
         struct vki_xen_domctl_hvmcontext        hvmcontext;
-        //struct vki_xen_domctl_hvmcontext_partial hvmcontext_partial;
+        struct vki_xen_domctl_hvmcontext_partial hvmcontext_partial;
         struct vki_xen_domctl_address_size      address_size;
         //struct vki_xen_domctl_sendtrigger       sendtrigger;
         //struct vki_xen_domctl_get_device_group  get_device_group;
@@ -354,19 +394,20 @@ struct vki_xen_domctl {
         //struct vki_xen_domctl_ext_vcpucontext   ext_vcpucontext;
         //struct vki_xen_domctl_set_target        set_target;
         //struct vki_xen_domctl_subscribe         subscribe;
-        //struct vki_xen_domctl_debug_op          debug_op;
-        //struct vki_xen_domctl_mem_event_op      mem_event_op;
+        struct vki_xen_domctl_debug_op          debug_op;
+        struct vki_xen_domctl_mem_event_op      mem_event_op;
         //struct vki_xen_domctl_mem_sharing_op    mem_sharing_op;
 #if defined(__i386__) || defined(__x86_64__)
         struct vki_xen_domctl_cpuid             cpuid;
         struct vki_xen_domctl_vcpuextstate      vcpuextstate;
 #endif
-        //struct vki_xen_domctl_set_access_required access_required;
+        struct vki_xen_domctl_set_access_required access_required;
         //struct vki_xen_domctl_audit_p2m         audit_p2m;
         //struct vki_xen_domctl_set_virq_handler  set_virq_handler;
         struct vki_xen_domctl_set_max_evtchn    set_max_evtchn;
         //struct vki_xen_domctl_gdbsx_memio       gdbsx_guest_memio;
         //struct vki_xen_domctl_set_broken_page_p2m set_broken_page_p2m;
+        struct vki_xen_domctl_cacheflush        cacheflush;
         //struct vki_xen_domctl_gdbsx_pauseunp_vcpu gdbsx_pauseunp_vcpu;
         //struct vki_xen_domctl_gdbsx_domstatus   gdbsx_domstatus;
         vki_uint8_t                         pad[128];

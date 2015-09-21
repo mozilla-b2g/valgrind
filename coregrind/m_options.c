@@ -38,24 +38,31 @@
 #include "pub_core_libcproc.h"
 #include "pub_core_mallocfree.h"
 #include "pub_core_seqmatch.h"     // VG_(string_match)
+#include "pub_core_aspacemgr.h"
 
 // See pub_{core,tool}_options.h for explanations of all these.
 
 
 /* Define, and set defaults. */
+
 VexControl VG_(clo_vex_control);
+VexRegisterUpdates VG_(clo_px_file_backed) = VexRegUpd_INVALID;
+
 Bool   VG_(clo_error_limit)    = True;
 Int    VG_(clo_error_exitcode) = 0;
+HChar *VG_(clo_error_markers)[2] = {NULL, NULL};
 
-#if defined(VGPV_arm_linux_android) || defined(VGPV_x86_linux_android) \
+#if defined(VGPV_arm_linux_android) \
+    || defined(VGPV_x86_linux_android) \
     || defined(VGPV_mips32_linux_android) \
-    || defined(VGP_arm64_linux) // temporarily disabled on arm64-linux
+    || defined(VGPV_arm64_linux_android)
 VgVgdb VG_(clo_vgdb)           = Vg_VgdbNo; // currently disabled on Android
 #else
 VgVgdb VG_(clo_vgdb)           = Vg_VgdbYes;
 #endif
 Int    VG_(clo_vgdb_poll)      = 5000; 
 Int    VG_(clo_vgdb_error)     = 999999999;
+UInt   VG_(clo_vgdb_stop_at)   = 0;
 const HChar *VG_(clo_vgdb_prefix)    = NULL;
 const HChar *VG_(arg_vgdb_prefix)    = NULL;
 Bool   VG_(clo_vgdb_shadow_registers) = False;
@@ -74,14 +81,13 @@ Bool   VG_(clo_trace_children) = False;
 const HChar* VG_(clo_trace_children_skip) = NULL;
 const HChar* VG_(clo_trace_children_skip_by_arg) = NULL;
 Bool   VG_(clo_child_silent_after_fork) = False;
-HChar* VG_(clo_log_fname_expanded) = NULL;
-HChar* VG_(clo_xml_fname_expanded) = NULL;
+const HChar* VG_(clo_log_fname_expanded) = NULL;
+const HChar* VG_(clo_xml_fname_expanded) = NULL;
 Bool   VG_(clo_time_stamp)     = False;
 Int    VG_(clo_input_fd)       = 0; /* stdin */
-Int    VG_(clo_n_suppressions) = 0;
-const HChar* VG_(clo_suppressions)[VG_CLO_MAX_SFILES];
-Int    VG_(clo_n_fullpath_after) = 0;
-const HChar* VG_(clo_fullpath_after)[VG_CLO_MAX_FULLPATH_AFTER];
+Bool   VG_(clo_default_supp)   = True;
+XArray *VG_(clo_suppressions);   // array of strings
+XArray *VG_(clo_fullpath_after); // array of strings
 const HChar* VG_(clo_extra_debuginfo_path) = NULL;
 const HChar* VG_(clo_debuginfo_server) = NULL;
 Bool   VG_(clo_allow_mismatched_debuginfo) = False;
@@ -111,25 +117,32 @@ Int    VG_(clo_redzone_size)   = -1;
 Int    VG_(clo_dump_error)     = 0;
 Int    VG_(clo_backtrace_size) = 12;
 Int    VG_(clo_merge_recursive_frames) = 0; // default value: no merge
-const HChar* VG_(clo_sim_hints)      = NULL;
+UInt   VG_(clo_sim_hints)      = 0;
 Bool   VG_(clo_sym_offsets)    = False;
+Bool   VG_(clo_read_inline_info) = False; // Or should be put it to True by default ???
 Bool   VG_(clo_read_var_info)  = False;
-Int    VG_(clo_n_req_tsyms)    = 0;
-const HChar* VG_(clo_req_tsyms)[VG_CLO_MAX_REQ_TSYMS];
-HChar* VG_(clo_require_text_symbol) = NULL;
+XArray *VG_(clo_req_tsyms);  // array of strings
 Bool   VG_(clo_run_libc_freeres) = True;
 Bool   VG_(clo_track_fds)      = False;
 Bool   VG_(clo_show_below_main)= False;
 Bool   VG_(clo_show_emwarns)   = False;
 Word   VG_(clo_max_stackframe) = 2000000;
+UInt   VG_(clo_max_threads)    = MAX_THREADS_DEFAULT;
 Word   VG_(clo_main_stacksize) = 0; /* use client's rlimit.stack */
+Word   VG_(clo_valgrind_stacksize) = VG_DEFAULT_STACK_ACTIVE_SZB;
 Bool   VG_(clo_wait_for_gdb)   = False;
 VgSmc  VG_(clo_smc_check)      = Vg_SmcStack;
-const HChar* VG_(clo_kernel_variant) = NULL;
+UInt   VG_(clo_kernel_variant) = 0;
 Bool   VG_(clo_dsymutil)       = False;
 Bool   VG_(clo_sigill_diag)    = True;
 UInt   VG_(clo_unw_stack_scan_thresh) = 0; /* disabled by default */
 UInt   VG_(clo_unw_stack_scan_frames) = 5;
+
+#if defined(VGO_darwin)
+UInt VG_(clo_resync_filter) = 1; /* enabled, but quiet */
+#else
+UInt VG_(clo_resync_filter) = 0; /* disabled */
+#endif
 
 
 /*====================================================================*/
@@ -140,16 +153,16 @@ UInt   VG_(clo_unw_stack_scan_frames) = 5;
 // expanding %p and %q entries.  Returns a new, malloc'd string.
 HChar* VG_(expand_file_name)(const HChar* option_name, const HChar* format)
 {
-   static HChar base_dir[VKI_PATH_MAX];
+   const HChar *base_dir;
    Int len, i = 0, j = 0;
    HChar* out;
+   const HChar *message = NULL;
 
-   Bool ok = VG_(get_startup_wd)(base_dir, VKI_PATH_MAX);
-   tl_assert(ok);
+   base_dir = VG_(get_startup_wd)();
 
    if (VG_STREQ(format, "")) {
       // Empty name, bad.
-      VG_(fmsg)("%s: filename is empty", option_name);
+      message = "No filename given\n";
       goto bad;
    }
    
@@ -158,13 +171,11 @@ HChar* VG_(expand_file_name)(const HChar* option_name, const HChar* format)
    // that we don't allow a legitimate filename beginning with '~' but that
    // seems very unlikely.
    if (format[0] == '~') {
-      VG_(fmsg)(
-         "%s: filename begins with '~'\n"
+      message = 
+         "Filename begins with '~'\n"
          "You probably expected the shell to expand the '~', but it\n"
          "didn't.  The rules for '~'-expansion vary from shell to shell.\n"
-         "You might have more luck using $HOME instead.\n",
-         option_name
-      );
+         "You might have more luck using $HOME instead.\n";
       goto bad;
    }
 
@@ -202,32 +213,30 @@ HChar* VG_(expand_file_name)(const HChar* option_name, const HChar* format)
             i++;
             if ('{' == format[i]) {
                // Get the env var name, print its contents.
-               const HChar* qualname;
-               HChar* qual;
-               i++;
-               qualname = &format[i];
+               HChar *qual;
+               Int begin_qualname = ++i;
                while (True) {
                   if (0 == format[i]) {
-                     VG_(fmsg)("%s: malformed %%q specifier\n", option_name);
+                     message = "Missing '}' in %q specifier\n";
                      goto bad;
                   } else if ('}' == format[i]) {
-                     // Temporarily replace the '}' with NUL to extract var
-                     // name.
-                     // FIXME: this is not safe as FORMAT is sometimes a
-                     // string literal which may reside in read-only memory
-                    ((HChar *)format)[i] = 0;
+                     Int qualname_len = i - begin_qualname;
+                     HChar qualname[qualname_len + 1];
+                     VG_(strncpy)(qualname, format + begin_qualname,
+                                  qualname_len);
+                     qualname[qualname_len] = '\0';
                      qual = VG_(getenv)(qualname);
                      if (NULL == qual) {
-                        VG_(fmsg)("%s: environment variable %s is not set\n",
-                                  option_name, qualname);
-                     // FIXME: this is not safe as FORMAT is sometimes a
-                     // string literal which may reside in read-only memory
-                        ((HChar *)format)[i] = '}';  // Put the '}' back.
+                        // This memory will leak, But we don't care because
+                        // VG_(fmsg_bad_option) will terminate the process.
+                        HChar *str = VG_(malloc)("options.efn.3",
+                                                 100 + qualname_len);
+                        VG_(sprintf)(str,
+                                     "Environment variable '%s' is not set\n",
+                                     qualname);
+                        message = str;
                         goto bad;
                      }
-                     // FIXME: this is not safe as FORMAT is sometimes a
-                     // string literal which may reside in read-only memory
-                     ((HChar *)format)[i] = '}';     // Put the '}' back.
                      i++;
                      break;
                   }
@@ -236,14 +245,13 @@ HChar* VG_(expand_file_name)(const HChar* option_name, const HChar* format)
                ENSURE_THIS_MUCH_SPACE(VG_(strlen)(qual));
                j += VG_(sprintf)(&out[j], "%s", qual);
             } else {
-               VG_(fmsg)("%s: expected '{' after '%%q'\n", option_name);
+               message = "Expected '{' after '%q'\n";
                goto bad;
             }
          } 
          else {
             // Something else, abort.
-            VG_(fmsg)("%s: expected 'p' or 'q' or '%%' after '%%'\n",
-                      option_name);
+            message = "Expected 'p' or 'q' or '%' after '%'\n";
             goto bad;
          }
       }
@@ -266,13 +274,11 @@ HChar* VG_(expand_file_name)(const HChar* option_name, const HChar* format)
    return out;
 
   bad: {
-   HChar* opt =    // 2:  1 for the '=', 1 for the NUL.
-      VG_(malloc)( "options.efn.3",
-                   VG_(strlen)(option_name) + VG_(strlen)(format) + 2 );
-   VG_(strcpy)(opt, option_name);
-   VG_(strcat)(opt, "=");
-   VG_(strcat)(opt, format);
-   VG_(fmsg_bad_option)(opt, "");
+   vg_assert(message != NULL);
+   // 2:  1 for the '=', 1 for the NUL.
+   HChar opt[VG_(strlen)(option_name) + VG_(strlen)(format) + 2];
+   VG_(sprintf)(opt, "%s=%s", option_name, format);
+   VG_(fmsg_bad_option)(opt, "%s", message);
   }
 }
 
@@ -300,8 +306,8 @@ static HChar const* consume_field ( HChar const* c ) {
    of the executable.  'child_argv' must not include the name of the
    executable itself; iow child_argv[0] must be the first arg, if any,
    for the child. */
-Bool VG_(should_we_trace_this_child) ( HChar* child_exe_name,
-                                       HChar** child_argv )
+Bool VG_(should_we_trace_this_child) ( const HChar* child_exe_name,
+                                       const HChar** child_argv )
 {
    // child_exe_name is pulled out of the guest's space.  We
    // should be at least marginally cautious with it, lest it

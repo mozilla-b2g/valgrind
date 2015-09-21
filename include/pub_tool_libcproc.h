@@ -59,6 +59,7 @@ extern Int  VG_(waitpid)( Int pid, Int *status, Int options );
 extern Int  VG_(system) ( const HChar* cmd );
 extern Int  VG_(fork)   ( void);
 extern void VG_(execv)  ( const HChar* filename, HChar** argv );
+extern Int  VG_(sysctl) ( Int *name, UInt namelen, void *oldp, SizeT *oldlenp, void *newp, SizeT newlen );
 
 /* ---------------------------------------------------------------------
    Resource limits and capabilities
@@ -88,6 +89,7 @@ extern Int VG_(getegid) ( void );
 // (roughly;  it gets initialised partway through Valgrind's initialisation
 // steps).
 extern UInt VG_(read_millisecond_timer) ( void );
+extern Int  VG_(gettimeofday)(struct vki_timeval *tv, struct vki_timezone *tz);
 
 /* ---------------------------------------------------------------------
    atfork

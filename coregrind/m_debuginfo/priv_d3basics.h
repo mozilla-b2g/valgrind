@@ -166,6 +166,13 @@ typedef enum dwarf_source_language
     DW_LANG_D = 0x0013,
     /* DWARF 4.  */
     DW_LANG_Python = 0x0014,
+    /* DWARF 5-pre. Only what GCC already outputs. */
+    DW_LANG_Go = 0x0016,
+    DW_LANG_C_plus_plus_11 = 0x001a,
+    DW_LANG_C11 = 0x001d,
+    DW_LANG_C_plus_plus_14 = 0x0021,
+    DW_LANG_Fortran03 = 0x0022,
+    DW_LANG_Fortran08 = 0x0023,
     /* MIPS.  */
     DW_LANG_Mips_Assembler = 0x8001,
     /* UPC.  */
@@ -344,6 +351,8 @@ typedef enum
     DW_AT_body_begin = 0x2105,
     DW_AT_body_end   = 0x2106,
     DW_AT_GNU_vector = 0x2107,
+    DW_AT_GNU_all_tail_call_sites = 0x2116,
+    DW_AT_GNU_all_call_sites = 0x2117,
     /* VMS extensions.  */
     DW_AT_VMS_rtnbeg_pd_address = 0x2201,
     /* UPC extension.  */
@@ -611,7 +620,7 @@ typedef
    GExpr;
 
 /* Show a so-called guarded expression */
-void ML_(pp_GX) ( GExpr* gx );
+void ML_(pp_GX) ( const GExpr* gx );
 
 /* Evaluation of a DWARF3 expression (and hence of a GExpr) may
    require knowing a suitably contextualising set of values for the
@@ -650,8 +659,8 @@ void ML_(pp_GXResult) ( GXResult res );
    computed, then fbGX can provide an expression for it.  If fbGX is
    NULL but the frame base is still needed, then evaluation of gx as a
    whole will fail. */
-GXResult ML_(evaluate_GX)( GExpr* gx, GExpr* fbGX,
-                           RegSummary* regs, const DebugInfo* di );
+GXResult ML_(evaluate_GX)( const GExpr* gx, const GExpr* fbGX,
+                           const RegSummary* regs, const DebugInfo* di );
 
 /* This is a subsidiary of ML_(evaluate_GX), which just evaluates a
    single standard DWARF3 expression.  Conventions w.r.t regs and fbGX
@@ -660,8 +669,8 @@ GXResult ML_(evaluate_GX)( GExpr* gx, GExpr* fbGX,
    This is needed for computing structure field offsets.  Note that
    ML_(evaluate_GX) and ML_(evaluate_Dwarf3_Expr) are mutually
    recursive. */
-GXResult ML_(evaluate_Dwarf3_Expr) ( UChar* expr, UWord exprszB, 
-                                     GExpr* fbGX, RegSummary* regs,
+GXResult ML_(evaluate_Dwarf3_Expr) ( const UChar* expr, UWord exprszB, 
+                                     const GExpr* fbGX, const RegSummary* regs,
                                      const DebugInfo* di,
                                      Bool push_initial_zero );
 
@@ -672,7 +681,7 @@ GXResult ML_(evaluate_Dwarf3_Expr) ( UChar* expr, UWord exprszB,
    location is denoted, a frame base expression is required, or the
    expression is not manifestly a constant.  The range of addresses
    covered by the guard is also ignored. */
-GXResult ML_(evaluate_trivial_GX)( GExpr* gx, const DebugInfo* di );
+GXResult ML_(evaluate_trivial_GX)( const GExpr* gx, const DebugInfo* di );
 
 /* Compute call frame address (CFA) for IP/SP/FP.  */
 Addr ML_(get_CFA) ( Addr ip, Addr sp, Addr fp,

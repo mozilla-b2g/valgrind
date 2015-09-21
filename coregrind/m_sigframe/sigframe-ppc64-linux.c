@@ -31,12 +31,11 @@
    The GNU General Public License is contained in the file COPYING.
 */
 
-#if defined(VGP_ppc64_linux)
+#if defined(VGP_ppc64be_linux) || defined(VGP_ppc64le_linux)
 
 #include "pub_core_basics.h"
 #include "pub_core_vki.h"
 #include "pub_core_vkiscnums.h"
-#include "pub_core_libcsetjmp.h"    // to keep _threadstate.h happy
 #include "pub_core_threadstate.h"
 #include "pub_core_aspacemgr.h"
 #include "pub_core_libcbase.h"
@@ -49,7 +48,7 @@
 #include "pub_core_tooliface.h"
 #include "pub_core_trampoline.h"
 #include "pub_core_transtab.h"      // VG_(discard_translations)
-
+#include "priv_sigframe.h"
 
 /* This module creates and removes signal frames for signal deliveries
    on ppc64-linux.
@@ -114,7 +113,7 @@ struct rt_sigframe {
    void*                 puc;
    vki_siginfo_t         info;
    struct vg_sig_private priv;
-   UChar                 abigap[288];
+   UChar                 abigap[288];   // unused
 };
 
 #define SET_SIGNAL_LR(zztst, zzval)                          \
@@ -131,49 +130,6 @@ struct rt_sigframe {
                 sizeof(UWord) );                             \
    } while (0)
 
-
-/* Extend the stack segment downwards if needed so as to ensure the
-   new signal frames are mapped to something.  Return a Bool
-   indicating whether or not the operation was successful.
-*/
-static Bool extend ( ThreadState *tst, Addr addr, SizeT size )
-{
-   ThreadId        tid = tst->tid;
-   NSegment const* stackseg = NULL;
-
-   if (VG_(extend_stack)(addr, tst->client_stack_szB)) {
-      stackseg = VG_(am_find_nsegment)(addr);
-      if (0 && stackseg)
-	 VG_(printf)("frame=%#lx seg=%#lx-%#lx\n",
-		     addr, stackseg->start, stackseg->end);
-   }
-
-   if (stackseg == NULL || !stackseg->hasR || !stackseg->hasW) {
-      VG_(message)(
-         Vg_UserMsg,
-         "Can't extend stack to %#lx during signal delivery for thread %d:\n",
-         addr, tid);
-      if (stackseg == NULL)
-         VG_(message)(Vg_UserMsg, "  no stack segment\n");
-      else
-         VG_(message)(Vg_UserMsg, "  too small or bad protection modes\n");
-
-      /* set SIGSEGV to default handler */
-      VG_(set_default_handler)(VKI_SIGSEGV);
-      VG_(synth_fault_mapping)(tid, addr);
-
-      /* The whole process should be about to die, since the default
-	 action of SIGSEGV to kill the whole process. */
-      return False;
-   }
-
-   /* For tracking memory events, indicate the entire frame has been
-      allocated. */
-   VG_TRACK( new_mem_stack_signal, addr - VG_STACK_REDZONE_SZB,
-             size + VG_STACK_REDZONE_SZB, tid );
-
-   return True;
-}
 
 
 /* EXPORTED */
@@ -201,7 +157,7 @@ void VG_(sigframe_create)( ThreadId tid,
    sp = sp_top_of_frame - sizeof(struct rt_sigframe);
 
    tst = VG_(get_ThreadState)(tid);
-   if (!extend(tst, sp, sp_top_of_frame - sp))
+   if (! ML_(sf_maybe_extend_stack)(tst, sp, sp_top_of_frame - sp, flags))
       return;
 
    vg_assert(VG_IS_16_ALIGNED(sp));
@@ -252,7 +208,11 @@ void VG_(sigframe_create)( ThreadId tid,
 #  undef DO
 
    frame->uc.uc_mcontext.gp_regs[VKI_PT_NIP]     = tst->arch.vex.guest_CIA;
-   frame->uc.uc_mcontext.gp_regs[VKI_PT_MSR]     = 0xf032;   /* pretty arbitrary */
+#ifdef VGP_ppc64le_linux
+   frame->uc.uc_mcontext.gp_regs[VKI_PT_MSR]     = 0xf033;  /* pretty arbitrary */
+#else
+   frame->uc.uc_mcontext.gp_regs[VKI_PT_MSR]     = 0xf032;  /* pretty arbitrary */
+#endif
    frame->uc.uc_mcontext.gp_regs[VKI_PT_ORIG_R3] = tst->arch.vex.guest_GPR3;
    frame->uc.uc_mcontext.gp_regs[VKI_PT_CTR]     = tst->arch.vex.guest_CTR;
    frame->uc.uc_mcontext.gp_regs[VKI_PT_LNK]     = tst->arch.vex.guest_LR;
@@ -283,7 +243,7 @@ void VG_(sigframe_create)( ThreadId tid,
             (Addr)&frame->tramp, sizeof(frame->tramp));
 
    /* invalidate any translation of this area */
-   VG_(discard_translations)( (Addr64)&frame->tramp[0], 
+   VG_(discard_translations)( (Addr)&frame->tramp[0], 
                               sizeof(frame->tramp), "stack_mcontext" );   
 
    /* set the signal handler to return to the trampoline */
@@ -302,9 +262,13 @@ void VG_(sigframe_create)( ThreadId tid,
 
    /* Handler is in fact a standard ppc64-linux function descriptor, 
       so extract the function entry point and also the toc ptr to use. */
+#if defined(VGP_ppc64be_linux)
    SET_SIGNAL_GPR(tid, 2, (Addr) ((ULong*)handler)[1]);
    tst->arch.vex.guest_CIA = (Addr) ((ULong*)handler)[0];
-
+#else
+   SET_SIGNAL_GPR(tid, 12, (Addr) handler);
+   tst->arch.vex.guest_CIA = (Addr) handler;
+#endif
    priv = &frame->priv;
    priv->magicPI       = 0x31415927;
    priv->sigNo_private = sigNo;
@@ -388,7 +352,7 @@ void VG_(sigframe_destroy)( ThreadId tid, Bool isRT )
    VG_TRACK( post_deliver_signal, tid, sigNo );
 }
 
-#endif // defined(VGP_ppc64_linux)
+#endif // defined(VGP_ppc64be_linux) || defined(VGP_ppc64le_linux) 
 
 /*--------------------------------------------------------------------*/
 /*--- end                                                          ---*/

@@ -34,7 +34,6 @@
 #include "pub_core_basics.h"
 #include "pub_core_vki.h"
 #include "pub_core_vkiscnums.h"
-#include "pub_core_libcsetjmp.h"    // to keep _threadstate.h happy
 #include "pub_core_threadstate.h"
 #include "pub_core_aspacemgr.h"
 #include "pub_core_debuglog.h"
@@ -51,7 +50,6 @@
 #include "pub_core_syscall.h"
 #include "pub_core_syswrap.h"
 #include "pub_core_tooliface.h"
-#include "pub_core_stacks.h"        // VG_(register_stack)
 
 #include "priv_types_n_macros.h"
 #include "priv_syswrap-generic.h"    /* for decls of generic wrappers */
@@ -216,7 +214,6 @@ static SysRes do_clone ( ThreadId ptid,
    ThreadState* ptst = VG_(get_ThreadState)(ptid);
    ThreadState* ctst = VG_(get_ThreadState)(ctid);
    UWord*       stack;
-   NSegment const* seg;
    SysRes       res;
    ULong        r2;
    vki_sigset_t blockall, savedmask;
@@ -251,7 +248,7 @@ static SysRes do_clone ( ThreadId ptid,
    ctst->arch.vex.guest_r2 = 0;
 
    if (sp != 0)
-      ctst->arch.vex.guest_r15 = sp;
+      ctst->arch.vex.guest_SP = sp;
 
    ctst->os_state.parent = ptid;
 
@@ -262,27 +259,7 @@ static SysRes do_clone ( ThreadId ptid,
    /* have the parents thread group */
    ctst->os_state.threadgroup = ptst->os_state.threadgroup;
 
-   /* We don't really know where the client stack is, because its
-      allocated by the client.  The best we can do is look at the
-      memory mappings and try to derive some useful information.  We
-      assume that esp starts near its highest possible value, and can
-      only go down to the start of the mmaped segment. */
-   seg = VG_(am_find_nsegment)((Addr)sp);
-   if (seg && seg->kind != SkResvn) {
-      ctst->client_stack_highest_word = (Addr)VG_PGROUNDUP(sp);
-      ctst->client_stack_szB = ctst->client_stack_highest_word - seg->start;
-
-      VG_(register_stack)(seg->start, ctst->client_stack_highest_word);
-
-      if (debug)
-	 VG_(printf)("tid %d: guessed client stack range %#lx-%#lx\n",
-		     ctid, seg->start, VG_PGROUNDUP(sp));
-   } else {
-      VG_(message)(Vg_UserMsg,
-                   "!? New thread %d starts with SP(%#lx) unmapped\n",
-		   ctid, sp);
-      ctst->client_stack_szB  = 0;
-   }
+   ML_(guess_and_register_stack) (sp, ctst);
 
    /* Assume the clone will succeed, and tell any tool that wants to
       know that this thread has come into existence.  If the clone
@@ -546,11 +523,11 @@ PRE(sys_clone)
 
    default:
       /* should we just ENOSYS? */
-      VG_(message)(Vg_UserMsg, "Unsupported clone() flags: 0x%lx", ARG2);
-      VG_(message)(Vg_UserMsg, "");
-      VG_(message)(Vg_UserMsg, "The only supported clone() uses are:");
-      VG_(message)(Vg_UserMsg, " - via a threads library (NPTL)");
-      VG_(message)(Vg_UserMsg, " - via the implementation of fork or vfork");
+      VG_(message)(Vg_UserMsg, "Unsupported clone() flags: 0x%lx\n", ARG2);
+      VG_(message)(Vg_UserMsg, "\n");
+      VG_(message)(Vg_UserMsg, "The only supported clone() uses are:\n");
+      VG_(message)(Vg_UserMsg, " - via a threads library (NPTL)\n");
+      VG_(message)(Vg_UserMsg, " - via the implementation of fork or vfork\n");
       VG_(unimplemented)
          ("Valgrind does not support general clone().");
    }
@@ -913,7 +890,7 @@ static SyscallTableEntry syscall_table[] = {
 
    LINX_(__NR_setfsuid, sys_setfsuid),                                // 215
    LINX_(__NR_setfsgid, sys_setfsgid),                                // 216
-// ?????(__NR_pivot_root, ),
+   LINX_(__NR_pivot_root, sys_pivot_root),                            // 217
    GENXY(__NR_mincore, sys_mincore),                                  // 218
    GENX_(__NR_madvise,  sys_madvise),                                 // 219
 
@@ -1016,7 +993,7 @@ static SyscallTableEntry syscall_table[] = {
    LINX_(__NR_faccessat,  sys_faccessat),                             // 300
    LINX_(__NR_pselect6, sys_pselect6),                                // 301
    LINXY(__NR_ppoll, sys_ppoll),                                      // 302
-// ?????(__NR_unshare, ),
+   LINX_(__NR_unshare, sys_unshare),                                  // 303
    LINX_(__NR_set_robust_list,  sys_set_robust_list),                 // 304
 
    LINXY(__NR_get_robust_list,  sys_get_robust_list),                 // 305
@@ -1058,11 +1035,22 @@ static SyscallTableEntry syscall_table[] = {
    LINXY(__NR_name_to_handle_at, sys_name_to_handle_at),              // 335
    LINXY(__NR_open_by_handle_at, sys_open_by_handle_at),              // 336
    LINXY(__NR_clock_adjtime, sys_clock_adjtime),                      // 337
-// ?????(__NR_syncfs, ),                                              // 338
+   LINX_(__NR_syncfs, sys_syncfs),                                    // 338
 // ?????(__NR_setns, ),                                               // 339
 
    LINXY(__NR_process_vm_readv, sys_process_vm_readv),                // 340
    LINX_(__NR_process_vm_writev, sys_process_vm_writev),              // 341
+// ?????(__NR_s390_runtime_instr, ),                                  // 342
+   LINX_(__NR_kcmp, sys_kcmp),                                        // 343
+// ?????(__NR_finit_module, ),                                        // 344
+
+// ?????(__NR_sched_setattr, ),                                       // 345
+// ?????(__NR_sched_getattr, ),                                       // 346
+// ?????(__NR_renameat2, ),                                           // 347
+// ?????(__NR_seccomp, ),                                             // 348
+   LINXY(__NR_getrandom, sys_getrandom),                              // 349
+
+   LINXY(__NR_memfd_create, sys_memfd_create)                         // 350
 };
 
 SyscallTableEntry* ML_(get_linux_syscall_entry) ( UInt sysno )

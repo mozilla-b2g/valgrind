@@ -37,6 +37,18 @@
    Formatting functions
    ------------------------------------------------------------------ */
 
+/* The formatting functions supports a subset (and 2 extensions) of
+   the 'printf' format.
+   The extensions are:
+     %pS : print a string (like %s) but escaping chars for XML safety.
+     %ps : with --xml=no, synonym for %s, with --xml=yes, synonym of %pS.
+
+   Note: these extensions do not cause the compiler to barf with PRINTF_CHECK
+   as for the classical printf, %p requires a pointer, which must also
+   be provided for the %ps and %pS extensions. The s/S following %p
+   are understood by PRINTF_CHECK as characters to output.
+*/
+
 extern UInt VG_(sprintf)  ( HChar* buf, const HChar* format, ... )
                           PRINTF_CHECK(2, 3);
 
@@ -50,11 +62,6 @@ extern UInt VG_(snprintf) ( HChar* buf, Int size,
 extern UInt VG_(vsnprintf)( HChar* buf, Int size, 
                                        const HChar *format, va_list vargs )
                           PRINTF_CHECK(3, 0);
-
-// Percentify n/m with d decimal places.  Includes the '%' symbol at the end.
-// Right justifies in 'buf'.
-extern void VG_(percentify)(ULong n, ULong m, UInt d, Int n_buf, HChar buf[]);
-
 
 /* ---------------------------------------------------------------------
    Output-printing functions
@@ -94,6 +101,21 @@ extern UInt VG_(printf_xml)  ( const HChar *format, ... )
 extern UInt VG_(vprintf_xml) ( const HChar *format, va_list vargs )
                              PRINTF_CHECK(1, 0);
 
+typedef struct _VgFile VgFile;
+
+extern VgFile *VG_(fopen)    ( const HChar *name, Int flags, Int mode );
+extern void    VG_(fclose)   ( VgFile *fp );
+extern UInt    VG_(fprintf)  ( VgFile *fp, const HChar *format, ... )
+                               PRINTF_CHECK(2, 3);
+extern UInt    VG_(vfprintf) ( VgFile *fp, const HChar *format, va_list vargs )
+                               PRINTF_CHECK(2, 0);
+
+/* Do a printf-style operation on either the XML 
+   or normal output channel
+   or gdb output channel, depending on the setting of VG_(clo_xml)
+   and the state of VG_(log_output_sink). */
+extern UInt VG_(emit) ( const HChar* format, ... ) PRINTF_CHECK(1, 2);
+
 /* Yet another, totally general, version of vprintf, which hands all
    output bytes to CHAR_SINK, passing it OPAQUE as the second arg. */
 extern void VG_(vcbprintf)( void(*char_sink)(HChar, void* opaque),
@@ -131,6 +153,11 @@ extern UInt VG_(dmsg)( const HChar* format, ... ) PRINTF_CHECK(1, 2);
 
 /* Flush any output cached by previous calls to VG_(message) et al. */
 extern void VG_(message_flush) ( void );
+
+/* Return a textual representation of a SysRes value in a statically
+   allocated buffer. The buffer will be overwritten with the next 
+   invocation. */
+extern const HChar *VG_(sr_as_string) ( SysRes sr );
 
 #endif   // __PUB_TOOL_LIBCPRINT_H
 

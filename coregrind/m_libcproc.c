@@ -114,8 +114,7 @@ HChar **VG_(env_setenv) ( HChar ***envp, const HChar* varname,
    HChar **env = (*envp);
    HChar **cpp;
    Int len = VG_(strlen)(varname);
-   HChar *valstr = VG_(arena_malloc)(VG_AR_CORE, "libcproc.es.1",
-                                     len + VG_(strlen)(val) + 2);
+   HChar *valstr = VG_(malloc)("libcproc.es.1", len + VG_(strlen)(val) + 2);
    HChar **oldenv = NULL;
 
    VG_(sprintf)(valstr, "%s=%s", varname, val);
@@ -128,7 +127,7 @@ HChar **VG_(env_setenv) ( HChar ***envp, const HChar* varname,
    }
 
    if (env == NULL) {
-      env = VG_(arena_malloc)(VG_AR_CORE, "libcproc.es.2", sizeof(HChar *) * 2);
+      env = VG_(malloc)("libcproc.es.2", sizeof(HChar *) * 2);
       env[0] = valstr;
       env[1] = NULL;
 
@@ -136,8 +135,7 @@ HChar **VG_(env_setenv) ( HChar ***envp, const HChar* varname,
 
    }  else {
       Int envlen = (cpp-env) + 2;
-      HChar **newenv = VG_(arena_malloc)(VG_AR_CORE, "libcproc.es.3",
-                                         envlen * sizeof(HChar *));
+      HChar **newenv = VG_(malloc)("libcproc.es.3", envlen * sizeof(HChar *));
 
       for (cpp = newenv; *env; )
 	 *cpp++ = *env++;
@@ -243,21 +241,20 @@ void VG_(env_remove_valgrind_env_stuff)(HChar** envp)
    // - DYLD_INSERT_LIBRARIES and DYLD_SHARED_REGION are Darwin-only
    for (i = 0; envp[i] != NULL; i++) {
       if (VG_(strncmp)(envp[i], "LD_PRELOAD=", 11) == 0) {
-         envp[i] = VG_(arena_strdup)(VG_AR_CORE, "libcproc.erves.1", envp[i]);
+         envp[i] = VG_(strdup)("libcproc.erves.1", envp[i]);
          ld_preload_str = &envp[i][11];
       }
       if (VG_(strncmp)(envp[i], "LD_LIBRARY_PATH=", 16) == 0) {
-         envp[i] = VG_(arena_strdup)(VG_AR_CORE, "libcproc.erves.2", envp[i]);
+         envp[i] = VG_(strdup)("libcproc.erves.2", envp[i]);
          ld_library_path_str = &envp[i][16];
       }
       if (VG_(strncmp)(envp[i], "DYLD_INSERT_LIBRARIES=", 22) == 0) {
-         envp[i] = VG_(arena_strdup)(VG_AR_CORE, "libcproc.erves.3", envp[i]);
+         envp[i] = VG_(strdup)("libcproc.erves.3", envp[i]);
          dyld_insert_libraries_str = &envp[i][22];
       }
    }
 
-   buf = VG_(arena_malloc)(VG_AR_CORE, "libcproc.erves.4",
-                           VG_(strlen)(VG_(libdir)) + 20);
+   buf = VG_(malloc)("libcproc.erves.4", VG_(strlen)(VG_(libdir)) + 20);
 
    // Remove Valgrind-specific entries from LD_*.
    VG_(sprintf)(buf, "%s*/vgpreload_*.so", VG_(libdir));
@@ -274,7 +271,7 @@ void VG_(env_remove_valgrind_env_stuff)(HChar** envp)
 
    // XXX if variable becomes empty, remove it completely?
 
-   VG_(arena_free)(VG_AR_CORE, buf);
+   VG_(free)(buf);
 }
 
 /* ---------------------------------------------------------------------
@@ -309,8 +306,7 @@ HChar **VG_(env_clone) ( HChar **oldenv )
 
    envlen = oldenvp - oldenv + 1;
    
-   newenv = VG_(arena_malloc)(VG_AR_CORE, "libcproc.ec.1",
-                              envlen * sizeof(HChar *));
+   newenv = VG_(malloc)("libcproc.ec.1", envlen * sizeof(HChar *));
 
    oldenvp = oldenv;
    newenvp = newenv;
@@ -354,7 +350,7 @@ Int VG_(system) ( const HChar* cmd )
    if (pid == 0) {
       /* child */
       const HChar* argv[4] = { "/bin/sh", "-c", cmd, 0 };
-      VG_(execv)(argv[0], (HChar **)argv);
+      VG_(execv)(argv[0], CONST_CAST(HChar **,argv));
 
       /* If we're still alive here, execv failed. */
       VG_(exit)(1);
@@ -389,6 +385,18 @@ Int VG_(system) ( const HChar* cmd )
       vg_assert(ir == 0);
       return zzz == -1 ? -1 : 0;
    }
+}
+
+Int VG_(sysctl)(Int *name, UInt namelen, void *oldp, SizeT *oldlenp, void *newp, SizeT newlen)
+{
+   SysRes res;
+#  if defined(VGO_darwin)
+   res = VG_(do_syscall6)(__NR___sysctl,
+                           name, namelen, oldp, oldlenp, newp, newlen);
+#  else
+   res = VG_(mk_SysRes_Error)(VKI_ENOSYS);
+#  endif
+   return sr_isError(res) ? -1 : sr_Res(res);
 }
 
 /* ---------------------------------------------------------------------
@@ -458,7 +466,7 @@ Int VG_(gettid)(void)
        * the /proc/self link is pointing...
        */
 
-#     if defined(VGP_arm64_linux)
+#     if defined(VGP_arm64_linux) || defined(VGP_tilegx_linux)
       res = VG_(do_syscall4)(__NR_readlinkat, VKI_AT_FDCWD,
                              (UWord)"/proc/self",
                              (UWord)pid, sizeof(pid));
@@ -536,27 +544,29 @@ Int VG_(getegid) ( void )
 /* Get supplementary groups into list[0 .. size-1].  Returns the
    number of groups written, or -1 if error.  Note that in order to be
    portable, the groups are 32-bit unsigned ints regardless of the
-   platform. */
+   platform. 
+   As a special case, if size == 0 the function returns the number of
+   groups leaving list untouched. */
 Int VG_(getgroups)( Int size, UInt* list )
 {
+   if (size < 0) return -1;
+
 #  if defined(VGP_x86_linux) || defined(VGP_ppc32_linux) \
-      || defined(VGP_mips64_linux)
+      || defined(VGP_mips64_linux) || defined(VGP_tilegx_linux)
    Int    i;
    SysRes sres;
-   UShort list16[64];
-   if (size < 0) return -1;
-   if (size > 64) size = 64;
+   UShort list16[size];
    sres = VG_(do_syscall2)(__NR_getgroups, size, (Addr)list16);
    if (sr_isError(sres))
       return -1;
-   if (sr_Res(sres) > size)
-      return -1;
-   for (i = 0; i < sr_Res(sres); i++)
-      list[i] = (UInt)list16[i];
+   if (size != 0) {
+      for (i = 0; i < sr_Res(sres); i++)
+         list[i] = (UInt)list16[i];
+   }
    return sr_Res(sres);
 
-#  elif defined(VGP_amd64_linux) || defined(VGP_ppc64_linux)  \
-        || defined(VGP_arm_linux)                             \
+#  elif defined(VGP_amd64_linux) || defined(VGP_arm_linux) \
+        || defined(VGP_ppc64be_linux) || defined(VGP_ppc64le_linux)  \
         || defined(VGO_darwin) || defined(VGP_s390x_linux)    \
         || defined(VGP_mips32_linux) || defined(VGP_arm64_linux)
    SysRes sres;
@@ -589,7 +599,15 @@ Int VG_(ptrace) ( Int request, Int pid, void *addr, void *data )
 
 Int VG_(fork) ( void )
 {
-#  if defined(VGO_linux)
+#  if defined(VGP_arm64_linux) || defined(VGP_tilegx_linux)
+   SysRes res;
+   res = VG_(do_syscall5)(__NR_clone, VKI_SIGCHLD,
+                          (UWord)NULL, (UWord)NULL, (UWord)NULL, (UWord)NULL);
+   if (sr_isError(res))
+      return -1;
+   return sr_Res(res);
+
+#  elif defined(VGO_linux)
    SysRes res;
    res = VG_(do_syscall0)(__NR_fork);
    if (sr_isError(res))
@@ -658,6 +676,20 @@ UInt VG_(read_millisecond_timer) ( void )
       base = now;
 
    return (now - base) / 1000;
+}
+
+Int VG_(gettimeofday)(struct vki_timeval *tv, struct vki_timezone *tz)
+{
+   SysRes res;
+   res = VG_(do_syscall2)(__NR_gettimeofday, (UWord)tv, (UWord)tz);
+
+   if (! sr_isError(res)) return 0;
+
+   /* Make sure, argument values are determinstic upon failure */
+   if (tv) *tv = (struct vki_timeval){ .tv_sec = 0, .tv_usec = 0 };
+   if (tz) *tz = (struct vki_timezone){ .tz_minuteswest = 0, .tz_dsttime = 0 };
+
+   return -1;
 }
 
 
@@ -741,13 +773,12 @@ void VG_(invalidate_icache) ( void *ptr, SizeT nbytes )
    // If I-caches are coherent, nothing needs to be done here
    if (vai.hwcache_info.icaches_maintain_coherence) return;
 
-#  if defined(VGA_ppc32) || defined(VGA_ppc64)
+#  if defined(VGA_ppc32) || defined(VGA_ppc64be) || defined(VGA_ppc64le)
    Addr startaddr = (Addr) ptr;
    Addr endaddr   = startaddr + nbytes;
    Addr cls;
    Addr addr;
 
-   VG_(machine_get_VexArchInfo)( NULL, &vai );
    cls = vai.ppc_icache_line_szB;
 
    /* Stay sane .. */
@@ -820,8 +851,8 @@ void VG_(invalidate_icache) ( void *ptr, SizeT nbytes )
    const UInt icache_line_size_power_of_two =
        (cache_type_register & kICacheLineSizeMask) >> kICacheLineSizeShift;
 
-   const UInt dcache_line_size_ = 1 << dcache_line_size_power_of_two;
-   const UInt icache_line_size_ = 1 << icache_line_size_power_of_two;
+   const UInt dcache_line_size_ = 4 * (1 << dcache_line_size_power_of_two);
+   const UInt icache_line_size_ = 4 * (1 << icache_line_size_power_of_two);
 
    Addr start = (Addr)ptr;
    // Sizes will be used to generate a mask big enough to cover a pointer.
@@ -889,9 +920,56 @@ void VG_(invalidate_icache) ( void *ptr, SizeT nbytes )
                                  (UWord) nbytes, (UWord) 3);
    vg_assert( sres._isError == 0 );
 
+#  elif defined(VGA_tilegx)
+   const HChar *start, *end;
+
+   /* L1 ICache is 32KB. cacheline size is 64 bytes. */
+   if (nbytes > 0x8000) nbytes = 0x8000;
+
+   start = (const HChar *)((unsigned long)ptr & -64ULL);
+   end = (const HChar*)ptr + nbytes - 1;
+
+   __insn_mf();
+
+   do {
+     const HChar* p;
+     for (p = start; p <= end; p += 64)
+       __insn_icoh(p);
+   } while (0);
+
+   __insn_drain();
+
 #  endif
 }
 
+
+/* ---------------------------------------------------------------------
+   dcache flushing
+   ------------------------------------------------------------------ */
+
+void VG_(flush_dcache) ( void *ptr, SizeT nbytes )
+{
+   /* Currently this is only required on ARM64. */
+#  if defined(VGA_arm64)
+   Addr startaddr = (Addr) ptr;
+   Addr endaddr   = startaddr + nbytes;
+   Addr cls;
+   Addr addr;
+
+   ULong ctr_el0;
+   __asm__ __volatile__ ("mrs %0, ctr_el0" : "=r"(ctr_el0));
+   cls = 4 * (1ULL << (0xF & (ctr_el0 >> 16)));
+
+   /* Stay sane .. */
+   vg_assert(cls == 64);
+
+   startaddr &= ~(cls - 1);
+   for (addr = startaddr; addr < endaddr; addr += cls) {
+      __asm__ __volatile__("dc cvau, %0" : : "r" (addr));
+   }
+   __asm__ __volatile__("dsb ish");
+#  endif
+}
 
 /*--------------------------------------------------------------------*/
 /*--- end                                                          ---*/

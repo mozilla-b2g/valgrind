@@ -15,6 +15,8 @@ EXTRA_DIST = \
 	cond_init_destroy.vgtest cond_init_destroy.stderr.exp \
 	cond_timedwait_invalid.vgtest cond_timedwait_invalid.stdout.exp \
 		cond_timedwait_invalid.stderr.exp \
+	cond_timedwait_test.vgtest cond_timedwait_test.stdout.exp \
+		cond_timedwait_test.stderr.exp \
 	bar_bad.vgtest bar_bad.stdout.exp bar_bad.stderr.exp \
 	bar_trivial.vgtest bar_trivial.stdout.exp bar_trivial.stderr.exp \
 	free_is_write.vgtest free_is_write.stdout.exp \
@@ -44,9 +46,12 @@ EXTRA_DIST = \
 	pth_destroy_cond.vgtest \
 		pth_destroy_cond.stdout.exp pth_destroy_cond.stderr.exp \
 	pth_cond_destroy_busy.vgtest pth_cond_destroy_busy.stderr.exp \
+	pth_cond_destroy_busy.stderr.exp-ppc64 \
 	pth_spinlock.vgtest pth_spinlock.stdout.exp pth_spinlock.stderr.exp \
 	rwlock_race.vgtest rwlock_race.stdout.exp rwlock_race.stderr.exp \
 	rwlock_test.vgtest rwlock_test.stdout.exp rwlock_test.stderr.exp \
+	shmem_abits.vgtest shmem_abits.stdout.exp shmem_abits.stderr.exp \
+	stackteardown.vgtest stackteardown.stdout.exp stackteardown.stderr.exp \
 	t2t_laog.vgtest t2t_laog.stdout.exp t2t_laog.stderr.exp \
 	tc01_simple_race.vgtest tc01_simple_race.stdout.exp \
 		tc01_simple_race.stderr.exp \
@@ -83,10 +88,14 @@ EXTRA_DIST = \
 	tc18_semabuse.vgtest tc18_semabuse.stdout.exp \
 		tc18_semabuse.stderr.exp \
 		tc18_semabuse.stderr.exp-linux-mips32 \
+		tc18_semabuse.stderr.exp-linux-mips32-b \
 	tc19_shadowmem.vgtest tc19_shadowmem.stdout.exp \
 		tc19_shadowmem.stderr.exp tc19_shadowmem.stderr.exp-mips32 \
 	tc20_verifywrap.vgtest tc20_verifywrap.stdout.exp \
-		tc20_verifywrap.stderr.exp tc20_verifywrap.stderr.exp-mips32 \
+		tc20_verifywrap.stderr.exp \
+		tc20_verifywrap.stderr.exp-glibc-2.18 \
+		tc20_verifywrap.stderr.exp-mips32 \
+		tc20_verifywrap.stderr.exp-mips32-b \
 		tc20_verifywrap.stderr.exp-s390x \
 	tc21_pthonce.vgtest tc21_pthonce.stdout.exp tc21_pthonce.stderr.exp \
 	tc22_exit_w_lock.vgtest tc22_exit_w_lock.stdout.exp \
@@ -96,7 +105,9 @@ EXTRA_DIST = \
 		tc23_bogus_condwait.stderr.exp \
 		tc23_bogus_condwait.stderr.exp-mips32 \
 	tc24_nonzero_sem.vgtest tc24_nonzero_sem.stdout.exp \
-		tc24_nonzero_sem.stderr.exp
+		tc24_nonzero_sem.stderr.exp \
+	tls_threads.vgtest tls_threads.stdout.exp \
+		tls_threads.stderr.exp
 
 # XXX: tc18_semabuse uses operations that are unsupported on Darwin.  It
 # should be conditionally compiled like tc20_verifywrap is.
@@ -104,6 +115,7 @@ check_PROGRAMS = \
 	annotate_hbefore \
 	cond_init_destroy \
 	cond_timedwait_invalid \
+	cond_timedwait_test \
 	free_is_write \
 	hg01_all_ok \
 	hg02_deadlock \
@@ -115,6 +127,8 @@ check_PROGRAMS = \
 	locked_vs_unlocked2 \
 	locked_vs_unlocked3 \
 	pth_destroy_cond \
+	shmem_abits \
+	stackteardown \
 	t2t \
 	tc01_simple_race \
 	tc02_simple_tls \
@@ -137,7 +151,8 @@ check_PROGRAMS = \
 	tc19_shadowmem \
 	tc21_pthonce \
 	tc23_bogus_condwait \
-	tc24_nonzero_sem
+	tc24_nonzero_sem \
+	tls_threads
 
 # DDD: it seg faults, and then the Valgrind exit path hangs
 # JRS 29 July 09: it craps out in the stack unwinder, in

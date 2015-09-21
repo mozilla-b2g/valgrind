@@ -87,6 +87,7 @@ DECL_TEMPLATE(linux, sys_syslog);
 DECL_TEMPLATE(linux, sys_vhangup);
 DECL_TEMPLATE(linux, sys_sysinfo);
 DECL_TEMPLATE(linux, sys_personality);
+DECL_TEMPLATE(linux, sys_pivot_root);
 DECL_TEMPLATE(linux, sys_sysctl);
 DECL_TEMPLATE(linux, sys_prctl);
 DECL_TEMPLATE(linux, sys_sendfile);
@@ -232,6 +233,8 @@ DECL_TEMPLATE(linux, sys_sched_rr_get_interval);
 DECL_TEMPLATE(linux, sys_sched_setaffinity);
 DECL_TEMPLATE(linux, sys_sched_getaffinity);
 
+DECL_TEMPLATE(linux, sys_unshare);
+
 // These ones have different parameters and/or return values on Darwin.
 // Also, some archs on Linux do not match the generic wrapper for sys_pipe.
 DECL_TEMPLATE(linux, sys_munlockall);
@@ -280,6 +283,12 @@ DECL_TEMPLATE(linux, sys_process_vm_writev);
 DECL_TEMPLATE(linux, sys_fanotify_init);
 DECL_TEMPLATE(linux, sys_fanotify_mark);
 
+// Linux-specific (new in Linux 3.17)
+DECL_TEMPLATE(linux, sys_getrandom);
+DECL_TEMPLATE(linux, sys_memfd_create);
+
+DECL_TEMPLATE(linux, sys_syncfs);
+
 /* ---------------------------------------------------------------------
    Wrappers for sockets and ipc-ery.  These are split into standalone
    procedures because x86-linux hides them inside multiplexors
@@ -298,6 +307,10 @@ extern void ML_(linux_POST_sys_msgctl)     ( TId, UW, UW, UW, UW );
 extern void ML_(linux_PRE_sys_getsockopt)  ( TId, UW, UW, UW, UW, UW );
 extern void ML_(linux_POST_sys_getsockopt) ( TId, SR, UW, UW, UW, UW, UW );
 extern void ML_(linux_PRE_sys_setsockopt)  ( TId, UW, UW, UW, UW, UW );
+extern void ML_(linux_PRE_sys_recvmmsg)    ( TId, UW, UW, UW, UW, UW );
+extern void ML_(linux_POST_sys_recvmmsg)   ( TId, UW, UW, UW, UW, UW, UW );
+extern void ML_(linux_PRE_sys_sendmmsg)    ( TId, UW, UW, UW, UW );
+extern void ML_(linux_POST_sys_sendmmsg)   ( TId, UW, UW, UW, UW, UW );
 
 // Linux-specific (but non-arch-specific) ptrace wrapper helpers
 extern void ML_(linux_PRE_getregset) ( ThreadId, long, long );
@@ -352,7 +365,7 @@ DECL_TEMPLATE(linux, sys_listen);
 DECL_TEMPLATE(linux, sys_getsockname);
 DECL_TEMPLATE(linux, sys_getpeername);
 DECL_TEMPLATE(linux, sys_socketpair);
-
+DECL_TEMPLATE(linux, sys_kcmp);
 
 #endif   // __PRIV_SYSWRAP_LINUX_H
 

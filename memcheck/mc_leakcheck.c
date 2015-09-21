@@ -594,6 +594,7 @@ static const HChar* pp_heuristic(LeakCheckHeuristic h)
    switch(h) {
    case LchNone:                return "none";
    case LchStdString:           return "stdstring";
+   case LchLength64:            return "length64";
    case LchNewArray:            return "newarray";
    case LchMultipleInheritance: return "multipleinheritance";
    default:                     return "???invalid heuristic???";
@@ -647,9 +648,9 @@ static Bool aligned_ptr_above_page0_is_vtable_addr(Addr ptr)
       if (pot_fn == 0)
          continue; // NULL fn pointer. Seems it can happen in vtable.
       seg = VG_(am_find_nsegment) (pot_fn);
-#if defined(VGA_ppc64)
-      // ppc64 use a thunk table. So, we have one more level of indirection
-      // to follow.
+#if defined(VGA_ppc64be)
+      // ppc64BE uses a thunk table (function descriptors), so we have one
+      // more level of indirection to follow.
       if (seg == NULL
           || seg->kind != SkFileC
           || !seg->hasR
@@ -670,6 +671,16 @@ static Bool aligned_ptr_above_page0_is_vtable_addr(Addr ptr)
    }
 
    return False;
+}
+
+// true if a is properly aligned and points to 64bits of valid memory
+static Bool is_valid_aligned_ULong ( Addr a )
+{
+   if (sizeof(Word) == 8)
+      return MC_(is_valid_aligned_word)(a);
+
+   return MC_(is_valid_aligned_word)(a)
+      && MC_(is_valid_aligned_word)(a + 4);
 }
 
 // If ch is heuristically reachable via an heuristic member of heur_set,
@@ -708,6 +719,23 @@ static LeakCheckHeuristic heuristic_reachedness (Addr ptr,
                // ??? or even a call to malloc ????
                return LchStdString;
             }
+         }
+      }
+   }
+
+   if (HiS(LchLength64, heur_set)) {
+      // Detects inner pointers that point at 64bit offset (8 bytes) into a
+      // block following the length of the remaining as 64bit number 
+      // (=total block size - 8).
+      // This is used e.g. by sqlite for tracking the total size of allocated
+      // memory.
+      // Note that on 64bit platforms, a block matching LchLength64 will
+      // also be matched by LchNewArray.
+      if ( ptr == ch->data + sizeof(ULong)
+          && is_valid_aligned_ULong(ch->data)) {
+         const ULong size = *((ULong*)ch->data);
+         if (size > 0 && (ch->szB - sizeof(ULong)) == size) {
+            return LchLength64;
          }
       }
    }
@@ -925,9 +953,9 @@ void scan_all_valid_memory_catcher ( Int sigNo, Addr addr )
 //   be A, while lower level cliques will be B and C. 
 /*
            A
-         /   \                          
+         /   \
         B     C
-       / \   / \ 
+       / \   / \
       D   E F   G
 */
 // Proper handling of top and lowest level clique allows block_list of a loss
@@ -1058,7 +1086,7 @@ lc_scan_memory(Addr start, SizeT len, Bool is_prior_definite,
                   MC_(pp_describe_addr) (ptr);
                   if (lc_is_a_chunk_ptr(addr, &ch_no, &ch, &ex) ) {
                      Int h;
-                     for (h = LchStdString; h <= LchMultipleInheritance; h++) {
+                     for (h = LchStdString; h < N_LEAK_CHECK_HEURISTICS; h++) {
                         if (heuristic_reachedness(addr, ch, ex, H2S(h)) == h) {
                            VG_(umsg)("block at %#lx considered reachable "
                                      "by ptr %#lx using %s heuristic\n",
@@ -1399,12 +1427,14 @@ static void print_results(ThreadId tid, LeakCheckParams* lcp)
    }
 
    if (VG_(clo_verbosity) > 0 && !VG_(clo_xml)) {
-      HChar d_bytes[20];
-      HChar d_blocks[20];
+      HChar d_bytes[31];
+      HChar d_blocks[31];
 #     define DBY(new,old) \
-      MC_(snprintf_delta) (d_bytes, 20, (new), (old), lcp->deltamode)
+      MC_(snprintf_delta) (d_bytes, sizeof(d_bytes), (new), (old), \
+                           lcp->deltamode)
 #     define DBL(new,old) \
-      MC_(snprintf_delta) (d_blocks, 20, (new), (old), lcp->deltamode)
+      MC_(snprintf_delta) (d_blocks, sizeof(d_blocks), (new), (old), \
+                           lcp->deltamode)
 
       VG_(umsg)("LEAK SUMMARY:\n");
       VG_(umsg)("   definitely lost: %'lu%s bytes in %'lu%s blocks\n",
@@ -1437,7 +1467,7 @@ static void print_results(ThreadId tid, LeakCheckParams* lcp)
       for (i = 0; i < N_LEAK_CHECK_HEURISTICS; i++)
          if (old_blocks_heuristically_reachable[i] > 0 
              || MC_(blocks_heuristically_reachable)[i] > 0)
-            VG_(umsg)("                        %19s: "
+            VG_(umsg)("                        %-19s: "
                       "%'lu%s bytes in %'lu%s blocks\n",
                       pp_heuristic(i),
                       MC_(bytes_heuristically_reachable)[i], 
@@ -1582,7 +1612,8 @@ static void scan_memory_root_set(Addr searched, SizeT szB)
 {
    Int   i;
    Int   n_seg_starts;
-   Addr* seg_starts = VG_(get_segment_starts)( &n_seg_starts );
+   Addr* seg_starts = VG_(get_segment_starts)( SkFileC | SkAnonC | SkShmC,
+                                               &n_seg_starts );
 
    tl_assert(seg_starts && n_seg_starts > 0);
 
@@ -1594,17 +1625,18 @@ static void scan_memory_root_set(Addr searched, SizeT szB)
       SizeT seg_size;
       NSegment const* seg = VG_(am_find_nsegment)( seg_starts[i] );
       tl_assert(seg);
+      tl_assert(seg->kind == SkFileC || seg->kind == SkAnonC ||
+                seg->kind == SkShmC);
 
-      if (seg->kind != SkFileC && seg->kind != SkAnonC) continue;
       if (!(seg->hasR && seg->hasW))                    continue;
       if (seg->isCH)                                    continue;
 
       // Don't poke around in device segments as this may cause
-      // hangs.  Exclude /dev/zero just in case someone allocated
+      // hangs.  Include /dev/zero just in case someone allocated
       // memory by explicitly mapping /dev/zero.
       if (seg->kind == SkFileC 
           && (VKI_S_ISCHR(seg->mode) || VKI_S_ISBLK(seg->mode))) {
-         HChar* dev_name = VG_(am_get_filename)( seg );
+         const HChar* dev_name = VG_(am_get_filename)( seg );
          if (dev_name && 0 == VG_(strcmp)(dev_name, "/dev/zero")) {
             // Don't skip /dev/zero.
          } else {

@@ -305,7 +305,7 @@ typedef enum { OpLoad=0, OpStore=1, OpAlu=2 } Op;
 
 /* --- Types --- */
 
-#define N_TYPES 11
+#define N_TYPES 14
 
 static Int type2index ( IRType ty )
 {
@@ -321,6 +321,9 @@ static Int type2index ( IRType ty )
       case Ity_F128:    return 8;
       case Ity_V128:    return 9;
       case Ity_V256:    return 10;
+      case Ity_D32:     return 11;
+      case Ity_D64:     return 12;
+      case Ity_D128:    return 13;
       default: tl_assert(0);
    }
 }
@@ -337,8 +340,11 @@ static const HChar* nameOfTypeIndex ( Int i )
       case 6: return "F32";  break;
       case 7: return "F64";  break;
       case 8: return "F128";  break;
-      case 9: return "V128"; break;
+      case 9: return "V128";  break;
       case 10: return "V256"; break;
+      case 11: return "D32";  break;
+      case 12: return "D64";  break;
+      case 13: return "D128"; break;
       default: tl_assert(0);
    }
 }
@@ -382,7 +388,7 @@ static void print_details ( void )
    VG_(umsg)("   Type        Loads       Stores       AluOps\n");
    VG_(umsg)("   -------------------------------------------\n");
    for (typeIx = 0; typeIx < N_TYPES; typeIx++) {
-      VG_(umsg)("   %4s %'12llu %'12llu %'12llu\n",
+      VG_(umsg)("   %-4s %'12llu %'12llu %'12llu\n",
                 nameOfTypeIndex( typeIx ),
                 detailCounts[OpLoad ][typeIx],
                 detailCounts[OpStore][typeIx],
@@ -646,15 +652,14 @@ static void lk_post_clo_init(void)
 static
 IRSB* lk_instrument ( VgCallbackClosure* closure,
                       IRSB* sbIn, 
-                      VexGuestLayout* layout, 
-                      VexGuestExtents* vge,
-                      VexArchInfo* archinfo_host,
+                      const VexGuestLayout* layout, 
+                      const VexGuestExtents* vge,
+                      const VexArchInfo* archinfo_host,
                       IRType gWordTy, IRType hWordTy )
 {
    IRDirty*   di;
    Int        i;
    IRSB*      sbOut;
-   HChar      fnname[100];
    IRTypeEnv* tyenv = sbIn->tyenv;
    Addr       iaddr = 0, dst;
    UInt       ilen = 0;
@@ -744,8 +749,9 @@ IRSB* lk_instrument ( VgCallbackClosure* closure,
                 */
                tl_assert(clo_fnname);
                tl_assert(clo_fnname[0]);
+               const HChar *fnname;
                if (VG_(get_fnname_if_entry)(st->Ist.IMark.addr, 
-                                            fnname, sizeof(fnname))
+                                            &fnname)
                    && 0 == VG_(strcmp)(fnname, clo_fnname)) {
                   di = unsafeIRDirty_0_N( 
                           0, "add_one_func_call", 
@@ -991,10 +997,6 @@ IRSB* lk_instrument ( VgCallbackClosure* closure,
 
 static void lk_fini(Int exitcode)
 {
-   HChar percentify_buf[5]; /* Two digits, '%' and 0. */
-   const int percentify_size = sizeof(percentify_buf) - 1;
-   const int percentify_decs = 0;
-   
    tl_assert(clo_fnname);
    tl_assert(clo_fnname[0]);
 
@@ -1008,10 +1010,8 @@ static void lk_fini(Int exitcode)
       VG_(umsg)("\n");
       VG_(umsg)("Jccs:\n");
       VG_(umsg)("  total:         %'llu\n", total_Jccs);
-      VG_(percentify)(taken_Jccs, (total_Jccs ? total_Jccs : 1),
-         percentify_decs, percentify_size, percentify_buf);
-      VG_(umsg)("  taken:         %'llu (%s)\n",
-         taken_Jccs, percentify_buf);
+      VG_(umsg)("  taken:         %'llu (%.0f%%)\n",
+                taken_Jccs, taken_Jccs * 100.0 / total_Jccs ?: 1);
       
       VG_(umsg)("\n");
       VG_(umsg)("Executed:\n");

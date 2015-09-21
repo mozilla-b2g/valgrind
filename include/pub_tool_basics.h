@@ -42,8 +42,8 @@
    Other headers to include
    ------------------------------------------------------------------ */
 
-// VEX defines Char, UChar, Short, UShort, Int, UInt, Long, ULong,
-// Addr32, Addr64, HWord, HChar, Bool, False and True.
+// VEX defines Char, UChar, Short, UShort, Int, UInt, Long, ULong, SizeT,
+// Addr, Addr32, Addr64, HWord, HChar, Bool, False and True.
 #include "libvex_basictypes.h"
 
 // For varargs types
@@ -86,17 +86,8 @@
 typedef unsigned long          UWord;     // 32             64
 typedef   signed long           Word;     // 32             64
 
-// Addr is for holding an address.  AddrH was intended to be "Addr on the
-// host", for the notional case where host word size != guest word size.
-// But since the assumption that host arch == guest arch has become so
-// deeply wired in, it's a pretty pointless distinction now.
-typedef UWord                  Addr;      // 32             64
-typedef UWord                  AddrH;     // 32             64
-
-// Our equivalents of POSIX 'size_t' and 'ssize_t':
-// - size_t is an "unsigned integer type of the result of the sizeof operator".
+// Our equivalent of POSIX 'ssize_t':
 // - ssize_t is "used for a count of bytes or an error indication".
-typedef UWord                  SizeT;     // 32             64
 typedef  Word                 SSizeT;     // 32             64
 
 // Our equivalent of POSIX 'ptrdiff_t':
@@ -162,9 +153,11 @@ typedef UInt ThreadId;
 #if defined(VGO_linux)
 typedef
    struct {
-      UWord _val;
-      UWord _valEx;   // only used on mips-linux
       Bool  _isError;
+      UWord _val;
+#if defined(VGA_mips64) || defined(VGA_mips32)
+      UWord _valEx;
+#endif
    }
    SysRes;
 #elif defined(VGO_darwin)
@@ -198,28 +191,32 @@ static inline Bool sr_isError ( SysRes sr ) {
 static inline UWord sr_Res ( SysRes sr ) {
    return sr._isError ? 0 : sr._val;
 }
+#if defined(VGA_mips64) || defined(VGA_mips32)
 static inline UWord sr_ResEx ( SysRes sr ) {
    return sr._isError ? 0 : sr._valEx;
 }
-static inline UWord sr_ResHI ( SysRes sr ) {
-   return 0;
-}
+#endif
 static inline UWord sr_Err ( SysRes sr ) {
    return sr._isError ? sr._val : 0;
 }
+// FIXME: this function needs to be fixed for MIPS
 static inline Bool sr_EQ ( SysRes sr1, SysRes sr2 ) {
-   return sr1._val == sr2._val 
-          && ((sr1._isError && sr2._isError) 
-              || (!sr1._isError && !sr2._isError));
+   return sr1._val == sr2._val
+       && sr1._isError == sr2._isError;
 }
 
 #elif defined(VGO_darwin)
 
 static inline Bool sr_isError ( SysRes sr ) {
    switch (sr._mode) {
-      case SysRes_UNIX_ERR: return True;
-      default:              return False;
+      case SysRes_UNIX_ERR:
+         return True;
       /* should check tags properly and assert here, but we can't here */
+      case SysRes_MACH:
+      case SysRes_MDEP:
+      case SysRes_UNIX_OK:
+      default:
+         return False;
    }
 }
 
@@ -227,22 +224,38 @@ static inline UWord sr_Res ( SysRes sr ) {
    switch (sr._mode) {
       case SysRes_MACH:
       case SysRes_MDEP:
-      case SysRes_UNIX_OK: return sr._wLO;
-      default: return 0; /* should assert, but we can't here */
+      case SysRes_UNIX_OK:
+         return sr._wLO;
+      /* should assert, but we can't here */
+      case SysRes_UNIX_ERR:
+      default:
+         return 0;
    }
 }
 
 static inline UWord sr_ResHI ( SysRes sr ) {
    switch (sr._mode) {
-      case SysRes_UNIX_OK: return sr._wHI;
-      default: return 0; /* should assert, but we can't here */
+      case SysRes_UNIX_OK:
+         return sr._wHI;
+      /* should assert, but we can't here */
+      case SysRes_MACH:
+      case SysRes_MDEP:
+      case SysRes_UNIX_ERR:
+      default:
+         return 0;
    }
 }
 
 static inline UWord sr_Err ( SysRes sr ) {
    switch (sr._mode) {
-      case SysRes_UNIX_ERR: return sr._wLO;
-      default: return 0; /* should assert, but we can't here */
+      case SysRes_UNIX_ERR:
+         return sr._wLO;
+      /* should assert, but we can't here */
+      case SysRes_MACH:
+      case SysRes_MDEP:
+      case SysRes_UNIX_OK:
+      default:
+         return 0;
    }
 }
 
@@ -270,22 +283,50 @@ static inline Bool sr_EQ ( SysRes sr1, SysRes sr2 ) {
 
 #if defined(VGA_x86) || defined(VGA_amd64) || defined (VGA_arm) \
     || ((defined(VGA_mips32) || defined(VGA_mips64)) && defined (_MIPSEL)) \
-    || defined(VGA_arm64)
+    || defined(VGA_arm64)  || defined(VGA_ppc64le) || defined(VGA_tilegx)
 #  define VG_LITTLEENDIAN 1
-#elif defined(VGA_ppc32) || defined(VGA_ppc64) || defined(VGA_s390x) \
+#elif defined(VGA_ppc32) || defined(VGA_ppc64be) || defined(VGA_s390x) \
       || ((defined(VGA_mips32) || defined(VGA_mips64)) && defined (_MIPSEB))
 #  define VG_BIGENDIAN 1
 #else
 #  error Unknown arch
 #endif
 
+/* Offsetof */
+#if !defined(offsetof)
+#   define offsetof(type,memb) ((SizeT)(HWord)&((type*)0)->memb)
+#endif
+
+/* Alignment */
+/* We use a prefix vg_ for vg_alignof as its behaviour slightly
+   differs from the standard alignof/gcc defined __alignof__
+
+   vg_alignof returns a "safe" alignement.
+   "safe" is defined as the alignment chosen by the compiler in
+   a struct made of a char followed by this type.
+
+      Note that this is not necessarily the "preferred" alignment
+      for a platform. This preferred alignment is returned by the gcc
+       __alignof__ and by the standard (in recent standard) alignof.
+      Compared to __alignof__, vg_alignof gives on some platforms (e.g.
+      amd64, ppc32, ppc64) a bigger alignment for long double (16 bytes
+      instead of 8).
+      On some platforms (e.g. x86), vg_alignof gives a smaller alignment
+      than __alignof__ for long long and double (4 bytes instead of 8). 
+      If we want to have the "preferred" alignment for the basic types,
+      then either we need to depend on gcc __alignof__, or on a (too)
+      recent standard and compiler (implementing <stdalign.h>).
+*/
+#define vg_alignof(_type) (sizeof(struct {char c;_type _t;})-sizeof(_type))
+
 /* Regparmness */
 #if defined(VGA_x86)
 #  define VG_REGPARM(n)            __attribute__((regparm(n)))
 #elif defined(VGA_amd64) || defined(VGA_ppc32) \
-      || defined(VGA_ppc64) || defined(VGA_arm) || defined(VGA_s390x) \
+      || defined(VGA_ppc64be) || defined(VGA_ppc64le) \
+      || defined(VGA_arm) || defined(VGA_s390x) \
       || defined(VGA_mips32) || defined(VGA_mips64) \
-      || defined(VGA_arm64)
+      || defined(VGA_arm64) || defined(VGA_tilegx)
 #  define VG_REGPARM(n)            /* */
 #else
 #  error Unknown arch
@@ -317,6 +358,20 @@ static inline Bool sr_EQ ( SysRes sr1, SysRes sr2 ) {
 #define PRINTF_CHECK(x, y)
 #endif
 
+// Macro to "cast" away constness (from type const T to type T) without
+// GCC complaining about it. This macro should be used RARELY. 
+// x is expected to have type const T
+#define CONST_CAST(T,x)    \
+   ({                      \
+      union {              \
+         const T in;      \
+         T out;           \
+      } var = { .in = x }; var.out;  \
+   })
+
+// Poor man's static assert
+#define STATIC_ASSERT(x)  extern int VG_(VG_(VG_(unused)))[(x) ? 1 : -1] \
+                                     __attribute__((unused))
 
 #endif /* __PUB_TOOL_BASICS_H */
 

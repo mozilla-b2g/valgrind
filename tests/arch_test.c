@@ -27,10 +27,13 @@ char* all_archs[] = {
    "amd64",
    "ppc32",
    "ppc64",
+   "ppc64le",
    "arm",
+   "arm64",
    "s390x",
    "mips32",
    "mips64",
+   "tilegx",
    NULL
 };
 
@@ -48,11 +51,14 @@ static Bool go(char* arch)
 #elif defined(VGP_ppc32_linux)
    if ( 0 == strcmp( arch, "ppc32" ) ) return True;
 
-#elif defined(VGP_ppc64_linux)
+#elif defined(VGP_ppc64be_linux)
    if ( 0 == strcmp( arch, "ppc64" ) ) return True;
 #if defined(VGA_SEC_ppc32)
    if ( 0 == strcmp( arch, "ppc32" ) ) return True;
 #endif
+
+#elif defined(VGP_ppc64le_linux)
+   if ( 0 == strcmp( arch, "ppc64" ) ) return True;
 
 #elif defined(VGP_s390x_linux)
    if ( 0 == strcmp( arch, "s390x" ) ) return True;
@@ -68,6 +74,9 @@ static Bool go(char* arch)
 
 #elif defined(VGP_mips64_linux)
    if ( 0 == strcmp( arch, "mips64" ) ) return True;
+
+#elif defined(VGP_tilegx_linux)
+   if ( 0 == strcmp( arch, "tilegx" ) ) return True;
 
 #else
 #  error Unknown platform

@@ -87,8 +87,6 @@ VgdbShared64 *shared64;
 
 #define VS_vgdb_pid (shared32 != NULL ? shared32->vgdb_pid : shared64->vgdb_pid)
 
-/* Calls malloc (size). Exits if memory can't be allocated. */
-static
 void *vmalloc(size_t size)
 {
    void * mem = malloc(size);
@@ -97,8 +95,6 @@ void *vmalloc(size_t size)
    return mem;
 }
 
-/* Calls realloc (size). Exits if memory can't be allocated. */
-static
 void *vrealloc(void *ptr,size_t size)
 {
    void * mem = realloc(ptr, size);
@@ -521,10 +517,12 @@ void prepare_fifos_and_shared_mem(int pid)
    user = getenv("LOGNAME");
    if (user == NULL) user = getenv("USER");
    if (user == NULL) user = "???";
+   if (strchr(user, '/')) user = "???";
 
    host = getenv("HOST");
    if (host == NULL) host = getenv("HOSTNAME");
    if (host == NULL) host = "???";
+   if (strchr(host, '/')) host = "???";
 
    len = strlen(vgdb_prefix) + strlen(user) + strlen(host) + 40;
    from_gdb_to_pid = vmalloc (len);
@@ -689,8 +687,10 @@ void received_signal (int signum)
       sigpipe++;
    } else if (signum == SIGALRM) {
       sigalrm++;
-#if defined(VGPV_arm_linux_android) || defined(VGPV_x86_linux_android) \
-    || defined(VGPV_mips32_linux_android)
+#if defined(VGPV_arm_linux_android) \
+    || defined(VGPV_x86_linux_android) \
+    || defined(VGPV_mips32_linux_android) \
+    || defined(VGPV_arm64_linux_android)
       /* Android has no pthread_cancel. As it also does not have
          an invoker implementation, there is no need for cleanup action.
          So, we just do nothing. */
@@ -751,6 +751,11 @@ void install_handlers(void)
       to cleanup.  */
    if (sigaction (SIGALRM, &action, &oldaction) != 0)
       XERROR (errno, "vgdb error sigaction SIGALRM\n");
+
+   /* unmask all signals, in case the process that launched vgdb
+      masked some. */
+   if (sigprocmask (SIG_SETMASK, &action.sa_mask, NULL) != 0)
+      XERROR (errno, "vgdb error sigprocmask");
 }
 
 /* close the FIFOs provided connections, terminate the invoker thread.  */
@@ -962,7 +967,17 @@ void standalone_send_commands(int pid,
       We then start to wait for packets (normally first a resume reply)
       At that point, we send our command and expect replies */
    buf[0] = '\003';
-   write_buf(to_pid, buf, 1, "write \\003 to wake up", /* notify */ True);
+   i = 0;
+   while (!write_buf(to_pid, buf, 1, 
+                     "write \\003 to wake up", /* notify */ True)) {
+      /* If write fails, retries up to 10 times every 0.5 seconds
+         This aims at solving the race condition described in
+         remote-utils.c remote_finish function. */
+      usleep(500*1000);
+      i++;
+      if (i >= 10)
+         XERROR (errno, "failed to send wake up char after 10 trials\n");
+   }
    from_pid = open_fifo(to_gdb_from_pid, O_RDONLY, 
                         "read cmd result from pid");
    
@@ -1047,37 +1062,44 @@ void standalone_send_commands(int pid,
 }
 
 /* report to user the existence of a vgdb-able valgrind process 
-   with given pid */
+   with given pid.
+   Note: this function does not use XERROR if an error is encountered
+   while producing the command line for pid, as this is not critical
+   and at least on MacOS, reading cmdline is not available. */
 static
 void report_pid (int pid, Bool on_stdout)
 {
-   char cmdline_file[100];
-   char cmdline[1000];
-   int fd;
-   int i, sz;
+   char cmdline_file[50];   // large enough
+   int fd, i;
+   FILE *out = on_stdout ? stdout : stderr;
+
+   fprintf(out, "use --pid=%d for ", pid);
 
    sprintf(cmdline_file, "/proc/%d/cmdline", pid);
    fd = open (cmdline_file, O_RDONLY);
    if (fd == -1) {
       DEBUG(1, "error opening cmdline file %s %s\n", 
             cmdline_file, strerror(errno));
-      sprintf(cmdline, "(could not open process command line)");
+      fprintf(out, "(could not open process command line)\n");
    } else {
-      sz = read(fd, cmdline, 1000);
-      for (i = 0; i < sz; i++)
-         if (cmdline[i] == 0)
-            cmdline[i] = ' ';
-      if (sz >= 0)
+      char cmdline[100];
+      ssize_t sz;
+      while ((sz = read(fd, cmdline, sizeof cmdline - 1)) != 0) {
+         for (i = 0; i < sz; i++)
+            if (cmdline[i] == 0)
+               cmdline[i] = ' ';
          cmdline[sz] = 0;
-      else {
+         fprintf(out, "%s", cmdline);
+      }
+      if (sz == -1) {
          DEBUG(1, "error reading cmdline file %s %s\n", 
                cmdline_file, strerror(errno));
-         sprintf(cmdline, "(could not read process command line)");
+         fprintf(out, "(error reading process command line)");
       }
+      fprintf(out, "\n");
       close (fd);
    }  
-   fprintf((on_stdout ? stdout : stderr), "use --pid=%d for %s\n", pid, cmdline);
-   fflush((on_stdout ? stdout : stderr));
+   fflush(out);
 }
 
 static

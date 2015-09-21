@@ -33,6 +33,7 @@
 #include "pub_core_libcassert.h"
 #include "pub_core_libcprint.h"
 #include "pub_core_mallocfree.h"
+#include "pub_core_aspacemgr.h"
 #include "pub_core_options.h"
 #include "pub_core_stacks.h"
 #include "pub_core_tooliface.h"
@@ -87,8 +88,8 @@
  */
 typedef struct _Stack {
    UWord id;
-   Addr start;
-   Addr end;
+   Addr start; // Lowest stack byte, included.
+   Addr end;   // Highest stack byte, included.
    struct _Stack *next;
 } Stack;
 
@@ -183,12 +184,15 @@ UWord VG_(register_stack)(Addr start, Addr end)
    Stack *i;
 
    if (start > end) {
+      /* If caller provides addresses in reverse order, swap them.
+         Ugly but not doing that breaks backward compatibility with
+         (user) code registering stacks with start/end inverted . */
       Addr t = end;
       end = start;
       start = t;
    }
 
-   i = (Stack *)VG_(arena_malloc)(VG_AR_CORE, "stacks.rs.1", sizeof(Stack));
+   i = VG_(malloc)("stacks.rs.1", sizeof(Stack));
    i->start = start;
    i->end = end;
    i->id = next_id++;
@@ -199,7 +203,7 @@ UWord VG_(register_stack)(Addr start, Addr end)
       current_stack = i;
    }
 
-   VG_(debugLog)(2, "stacks", "register %p-%p as stack %lu\n",
+   VG_(debugLog)(2, "stacks", "register [start-end] [%p-%p] as stack %lu\n",
                     (void*)start, (void*)end, i->id);
 
    return i->id;
@@ -227,7 +231,7 @@ void VG_(deregister_stack)(UWord id)
          } else {
             prev->next = i->next;
          }
-         VG_(arena_free)(VG_AR_CORE, i);
+         VG_(free)(i);
          return;
       }
       prev = i;
@@ -246,9 +250,11 @@ void VG_(change_stack)(UWord id, Addr start, Addr end)
 
    while (i) {
       if (i->id == id) {
-         VG_(debugLog)(2, "stacks", "change stack %lu from %p-%p to %p-%p\n",
+         VG_(debugLog)(2, "stacks", 
+                       "change stack %lu from [%p-%p] to [%p-%p]\n",
                        id, (void*)i->start, (void*)i->end,
                            (void*)start,    (void*)end);
+         /* FIXME : swap start/end like VG_(register_stack) ??? */
          i->start = start;
          i->end = end;
          return;
@@ -264,13 +270,85 @@ void VG_(change_stack)(UWord id, Addr start, Addr end)
 void VG_(stack_limits)(Addr SP, Addr *start, Addr *end )
 {
    Stack* stack = find_stack_by_addr(SP);
+   NSegment const *stackseg = VG_(am_find_nsegment) (SP);
 
-   if (stack) {
+   if (LIKELY(stack)) {
       *start = stack->start;
       *end = stack->end;
    }
-}
 
+   /* SP is assumed to be in a RW segment or in the SkResvn segment of an
+      extensible stack (normally, only the main thread has an extensible
+      stack segment).
+      If no such segment is found, assume we have no valid
+      stack for SP, and set *start and *end to 0.
+      Otherwise, possibly reduce the stack limits using the boundaries of
+      the RW segment/SkResvn segments containing SP. */
+   if (UNLIKELY(stackseg == NULL)) {
+      VG_(debugLog)(2, "stacks", 
+                    "no addressable segment for SP %p\n", 
+                    (void*)SP);
+      *start = 0;
+      *end = 0;
+      return;
+   } 
+
+   if (UNLIKELY((!stackseg->hasR || !stackseg->hasW)
+                && (stackseg->kind != SkResvn || stackseg->smode != SmUpper))) {
+      VG_(debugLog)(2, "stacks", 
+                    "segment for SP %p is not RW or not a SmUpper Resvn\n",
+                    (void*)SP);
+      *start = 0;
+      *end = 0;
+      return;
+   } 
+
+   /* SP is in a RW segment, or in the SkResvn of an extensible stack.
+      We can use the seg start as the stack start limit. */
+   if (UNLIKELY(*start < stackseg->start)) {
+      VG_(debugLog)(2, "stacks", 
+                    "segment for SP %p changed stack start limit"
+                    " from %p to %p\n",
+                    (void*)SP, (void*)*start, (void*)stackseg->start);
+      *start = stackseg->start;
+   }
+
+   /* Now, determine the stack end limit. If the stackseg is SkResvn,
+      we need to get the neighbour segment (towards higher addresses).
+      This segment must be anonymous and RW. */
+   if (UNLIKELY(stackseg->kind == SkResvn)) {
+      stackseg = VG_(am_next_nsegment)(stackseg, /*forward*/ True);
+      if (!stackseg || !stackseg->hasR || !stackseg->hasW
+          || stackseg->kind != SkAnonC) {
+         VG_(debugLog)(2, "stacks", 
+                       "Next forward segment for SP %p Resvn segment"
+                       " is not RW or not AnonC\n",
+                       (void*)SP);
+         *start = 0;
+         *end = 0;
+         return;
+      }
+   }
+
+   /* Limit the stack end limit, using the found segment. */
+   if (UNLIKELY(*end > stackseg->end)) {
+      VG_(debugLog)(2, "stacks", 
+                    "segment for SP %p changed stack end limit"
+                    " from %p to %p\n",
+                    (void*)SP, (void*)*end, (void*)stackseg->end);
+      *end = stackseg->end;
+   }
+
+   /* If reducing start and/or end to the SP segment gives an
+      empty range, return 'empty' limits */
+   if (UNLIKELY(*start > *end)) {
+      VG_(debugLog)(2, "stacks", 
+                    "stack for SP %p start %p after end %p\n",
+                    (void*)SP, (void*)*start, (void*)end);
+      *start = 0;
+      *end = 0;
+   }
+}
 
 /* complaints_stack_switch reports that SP has changed by more than some
    threshold amount (by default, 2MB).  We take this to mean that the
@@ -333,8 +411,9 @@ static void complaints_stack_switch (Addr old_SP, Addr new_SP)
                 (void *) current_stack->end,                            \
                 current_stack->id);                                     \
          return;                                                        \
-      } else                                                            \
+      } else {                                                          \
          EDEBUG("new current_stack not found\n");                       \
+      }                                                                 \
    }
 
 #define IF_BIG_DELTA_complaints_AND_RETURN                              \

@@ -62,7 +62,6 @@
 
 SysRes VG_(mk_SysRes_x86_linux) ( Int val ) {
    SysRes res;
-   res._valEx   = 0; /* unused except on mips-linux */
    res._isError = val >= -4095 && val <= -1;
    if (res._isError) {
       res._val = (UInt)(-val);
@@ -75,7 +74,6 @@ SysRes VG_(mk_SysRes_x86_linux) ( Int val ) {
 /* Similarly .. */
 SysRes VG_(mk_SysRes_amd64_linux) ( Long val ) {
    SysRes res;
-   res._valEx   = 0; /* unused except on mips-linux */
    res._isError = val >= -4095 && val <= -1;
    if (res._isError) {
       res._val = (ULong)(-val);
@@ -85,11 +83,21 @@ SysRes VG_(mk_SysRes_amd64_linux) ( Long val ) {
    return res;
 }
 
+SysRes VG_(mk_SysRes_tilegx_linux) ( Long val ) {
+  SysRes res;
+  res._isError = val >= -4095 && val <= -1;
+  if (res._isError) {
+    res._val = (ULong)(-val);
+  } else {
+    res._val = (ULong)val;
+  }
+  return res;
+}
+
 /* PPC uses the CR7.SO bit to flag an error (CR0 in IBM-speak) */
 /* Note this must be in the bottom bit of the second arg */
 SysRes VG_(mk_SysRes_ppc32_linux) ( UInt val, UInt cr0so ) {
    SysRes res;
-   res._valEx   = 0; /* unused except on mips-linux */
    res._isError = (cr0so & 1) != 0;
    res._val     = val;
    return res;
@@ -98,7 +106,6 @@ SysRes VG_(mk_SysRes_ppc32_linux) ( UInt val, UInt cr0so ) {
 /* As per ppc32 version, cr0.so must be in l.s.b. of 2nd arg */
 SysRes VG_(mk_SysRes_ppc64_linux) ( ULong val, ULong cr0so ) {
    SysRes res;
-   res._valEx   = 0; /* unused except on mips-linux */
    res._isError = (cr0so & 1) != 0;
    res._val     = val;
    return res;
@@ -106,7 +113,6 @@ SysRes VG_(mk_SysRes_ppc64_linux) ( ULong val, ULong cr0so ) {
 
 SysRes VG_(mk_SysRes_s390x_linux) ( Long val ) {
    SysRes res;
-   res._valEx   = 0; /* unused except on mips-linux */
    res._isError = val >= -4095 && val <= -1;
    if (res._isError) {
       res._val = -val;
@@ -118,7 +124,6 @@ SysRes VG_(mk_SysRes_s390x_linux) ( Long val ) {
 
 SysRes VG_(mk_SysRes_arm_linux) ( Int val ) {
    SysRes res;
-   res._valEx   = 0; /* unused except on mips-linux */
    res._isError = val >= -4095 && val <= -1;
    if (res._isError) {
       res._val = (UInt)(-val);
@@ -130,7 +135,6 @@ SysRes VG_(mk_SysRes_arm_linux) ( Int val ) {
 
 SysRes VG_(mk_SysRes_arm64_linux) ( Long val ) {
    SysRes res;
-   res._valEx   = 0; /* unused except on mips-linux */
    res._isError = val >= -4095 && val <= -1;
    if (res._isError) {
       res._val = (ULong)(-val);
@@ -140,6 +144,7 @@ SysRes VG_(mk_SysRes_arm64_linux) ( Long val ) {
    return res;
 }
 
+#if defined(VGA_mips64) || defined(VGA_mips32)
 /* MIPS uses a3 != 0 to flag an error */
 SysRes VG_(mk_SysRes_mips32_linux) ( UWord v0, UWord v1, UWord a3 ) {
    SysRes res;
@@ -157,11 +162,14 @@ SysRes VG_(mk_SysRes_mips64_linux) ( ULong v0, ULong v1, ULong a3 ) {
    res._valEx   = v1;
    return res;
 }
+#endif
 
 /* Generic constructors. */
 SysRes VG_(mk_SysRes_Error) ( UWord err ) {
    SysRes r;
-   r._valEx   = 0; /* unused except on mips-linux */
+#if defined(VGA_mips64) || defined(VGA_mips32)
+   r._valEx   = 0;
+#endif
    r._isError = True;
    r._val     = err;
    return r;
@@ -169,7 +177,9 @@ SysRes VG_(mk_SysRes_Error) ( UWord err ) {
 
 SysRes VG_(mk_SysRes_Success) ( UWord res ) {
    SysRes r;
-   r._valEx   = 0; /* unused except on mips-linux */
+#if defined(VGA_mips64) || defined(VGA_mips32)
+   r._valEx   = 0;
+#endif
    r._isError = False;
    r._val     = res;
    return r;
@@ -295,10 +305,19 @@ asm(
 ".text\n"
 ".globl do_syscall_WRK\n"
 "do_syscall_WRK:\n"
+"	.cfi_startproc\n"
 "	push	%esi\n"
+"	.cfi_adjust_cfa_offset 4\n"
+"	.cfi_offset %esi, -8\n"
 "	push	%edi\n"
+"	.cfi_adjust_cfa_offset 4\n"
+"	.cfi_offset %edi, -12\n"
 "	push	%ebx\n"
+"	.cfi_adjust_cfa_offset 4\n"
+"	.cfi_offset %ebx, -16\n"
 "	push	%ebp\n"
+"	.cfi_adjust_cfa_offset 4\n"
+"	.cfi_offset %ebp, -20\n"
 "	movl	16+ 4(%esp),%eax\n"
 "	movl	16+ 8(%esp),%ebx\n"
 "	movl	16+12(%esp),%ecx\n"
@@ -308,10 +327,19 @@ asm(
 "	movl	16+28(%esp),%ebp\n"
 "	int	$0x80\n"
 "	popl	%ebp\n"
+"	.cfi_adjust_cfa_offset -4\n"
+"	.cfi_restore %ebp\n"
 "	popl	%ebx\n"
+"	.cfi_adjust_cfa_offset -4\n"
+"	.cfi_restore %ebx\n"
 "	popl	%edi\n"
+"	.cfi_adjust_cfa_offset -4\n"
+"	.cfi_restore %edi\n"
 "	popl	%esi\n"
+"	.cfi_adjust_cfa_offset -4\n"
+"	.cfi_restore %esi\n"
 "	ret\n"
+"	.cfi_endproc\n"
 ".previous\n"
 );
 
@@ -386,7 +414,7 @@ asm(
 ".previous\n"
 );
 
-#elif defined(VGP_ppc64_linux)
+#elif defined(VGP_ppc64be_linux)
 /* Due to the need to return 65 bits of result, this is completely
    different from the ppc32 case.  The single arg register points to a
    7-word block containing the syscall # and the 6 args.  The syscall
@@ -420,6 +448,45 @@ asm(
 "        andi. 3,3,1\n"
 "        std  3,8(5)\n"    /* argblock[1] = cr0.s0 & 1 */
 "        blr\n"
+);
+
+#elif defined(VGP_ppc64le_linux)
+/* Due to the need to return 65 bits of result, this is completely
+   different from the ppc32 case.  The single arg register points to a
+   7-word block containing the syscall # and the 6 args.  The syscall
+   result proper is put in [0] of the block, and %cr0.so is in the
+   bottom bit of [1]. */
+extern void do_syscall_WRK ( ULong* argblock );
+/* Little Endian supports ELF version 2.  In the future, it may support
+ * other versions as well.
+ */
+asm(
+".align   2\n"
+".globl   do_syscall_WRK\n"
+".type    do_syscall_WRK,@function\n"
+"do_syscall_WRK:\n"
+"#if  _CALL_ELF == 2"               "\n"
+"0:      addis        2,12,.TOC.-0b@ha\n"
+"        addi         2,2,.TOC.-0b@l\n"
+"        .localentry do_syscall_WRK, .-do_syscall_WRK\n"
+"#endif"                            "\n"
+"        std  3,-16(1)\n"  /* stash arg */
+"        ld   8, 48(3)\n"  /* sc arg 6 */
+"        ld   7, 40(3)\n"  /* sc arg 5 */
+"        ld   6, 32(3)\n"  /* sc arg 4 */
+"        ld   5, 24(3)\n"  /* sc arg 3 */
+"        ld   4, 16(3)\n"  /* sc arg 2 */
+"        ld   0,  0(3)\n"  /* sc number */
+"        ld   3,  8(3)\n"  /* sc arg 1 */
+"        sc\n"             /* result in r3 and cr0.so */
+"        ld   5,-16(1)\n"  /* reacquire argblock ptr (r5 is caller-save) */
+"        std  3,0(5)\n"    /* argblock[0] = r3 */
+"        mfcr 3\n"
+"        srwi 3,3,28\n"
+"        andi. 3,3,1\n"
+"        std  3,8(5)\n"    /* argblock[1] = cr0.s0 & 1 */
+"        blr\n"
+"        .size do_syscall_WRK, .-do_syscall_WRK\n"
 );
 
 #elif defined(VGP_arm_linux)
@@ -694,6 +761,27 @@ asm (
 ".previous\n"
 );
 
+#elif defined(VGP_tilegx_linux)
+extern UWord do_syscall_WRK (
+          UWord syscall_no, 
+          UWord a1, UWord a2, UWord a3,
+          UWord a4, UWord a5, UWord a6
+       );
+asm(
+    ".text\n"
+    "do_syscall_WRK:\n"
+    "move  r10, r0\n"
+    "move  r0,  r1\n"
+    "move  r1,  r2\n"
+    "move  r2,  r3\n"
+    "move  r3,  r4\n"
+    "move  r4,  r5\n"
+    "move  r5,  r6\n"
+    "swint1\n"
+    "jrp   lr\n"
+    ".previous\n"
+    );
+
 #else
 #  error Unknown platform
 #endif
@@ -720,7 +808,7 @@ SysRes VG_(do_syscall) ( UWord sysno, UWord a1, UWord a2, UWord a3,
    UInt  cr0so   = (UInt)(ret);
    return VG_(mk_SysRes_ppc32_linux)( val, cr0so );
 
-#  elif defined(VGP_ppc64_linux)
+#  elif defined(VGP_ppc64be_linux) || defined(VGP_ppc64le_linux)
    ULong argblock[7];
    argblock[0] = sysno;
    argblock[1] = a1;
@@ -821,6 +909,11 @@ SysRes VG_(do_syscall) ( UWord sysno, UWord a1, UWord a2, UWord a3,
    ULong V1 = (ULong)v1_a3[0];
    ULong A3 = (ULong)v1_a3[1];
    return VG_(mk_SysRes_mips64_linux)( V0, V1, A3 );
+
+#  elif defined(VGP_tilegx_linux)
+   UWord val = do_syscall_WRK(sysno,a1,a2,a3,a4,a5,a6);
+
+   return VG_(mk_SysRes_tilegx_linux)( val );
 
 #else
 #  error Unknown platform

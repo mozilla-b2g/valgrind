@@ -28,6 +28,8 @@ EXTRA_DIST = \
 	internals/3_7_BUGSTATUS.txt \
 	internals/3_8_BUGSTATUS.txt \
 	internals/3_9_BUGSTATUS.txt \
+	internals/3_10_BUGSTATUS.txt \
+	internals/MERGE_3_10_1.txt \
 	internals/arm_thumb_notes_gdbserver.txt \
 	internals/avx-notes.txt \
 	internals/BIG_APP_NOTES.txt \
@@ -45,6 +47,8 @@ EXTRA_DIST = \
 	internals/porting-HOWTO.txt \
 	internals/mpi2entries.txt \
 	internals/porting-to-ARM.txt \
+	internals/qemu-aarch64-linux-HOWTO.txt \
+	internals/qemu-mips64-linux-HOWTO.txt \
 	internals/register-uses.txt \
 	internals/release-HOWTO.txt \
 	internals/segments-seginfos.txt \
@@ -230,6 +234,7 @@ dist-hook: FAQ.txt html-docs man-pages
 
 distclean-local:
 	rm -rf html print
+	rm -f FAQ.txt
 	rm -f $(top_builddir)/FAQ.txt $(top_builddir)/docs/*.1
 
 

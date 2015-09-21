@@ -95,7 +95,6 @@ struct elfinfo *readelf(Int fd, const HChar *filename)
    struct elfinfo *e = VG_(malloc)("ume.re.1", sizeof(*e));
    Int phsz;
 
-   vg_assert(e);
    e->fd = fd;
 
    sres = VG_(pread)(fd, &e->e, sizeof(e->e), 0);
@@ -136,7 +135,6 @@ struct elfinfo *readelf(Int fd, const HChar *filename)
 
    phsz = sizeof(ESZ(Phdr)) * e->e.e_phnum;
    e->p = VG_(malloc)("ume.re.2", phsz);
-   vg_assert(e->p);
 
    sres = VG_(pread)(fd, e->p, phsz, e->e.e_phoff);
    if (sr_isError(sres) || sr_Res(sres) != phsz) {
@@ -246,7 +244,7 @@ ESZ(Addr) mapelf(struct elfinfo *e, ESZ(Addr) base)
    return elfbrk;
 }
 
-Bool VG_(match_ELF)(const void *hdr, Int len)
+Bool VG_(match_ELF)(const void *hdr, SizeT len)
 {
    const ESZ(Ehdr) *e = hdr;
    return (len > sizeof(*e)) && VG_(memcmp)(&e->e_ident[0], ELFMAG, SELFMAG) == 0;
@@ -372,7 +370,6 @@ Int VG_(load_ELF)(Int fd, const HChar* name, /*MOD*/ExeInfo* info)
          Int intfd;
          Int baseaddr_set;
 
-         vg_assert(buf);
          VG_(pread)(fd, buf, ph->p_filesz, ph->p_offset);
          buf[ph->p_filesz] = '\0';
 
@@ -495,6 +492,7 @@ Int VG_(load_ELF)(Int fd, const HChar* name, /*MOD*/ExeInfo* info)
       VG_(close)(interp->fd);
 
       entry = (void *)(advised - interp_addr + interp->e.e_entry);
+
       info->interp_offset = advised - interp_addr;
 
       VG_(free)(interp->p);
@@ -505,15 +503,19 @@ Int VG_(load_ELF)(Int fd, const HChar* name, /*MOD*/ExeInfo* info)
    info->exe_base = minaddr + ebase;
    info->exe_end  = maxaddr + ebase;
 
-#if defined(VGP_ppc64_linux)
-   /* On PPC64, a func ptr is represented by a TOC entry ptr.  This
-      TOC entry contains three words; the first word is the function
+#if defined(VGP_ppc64be_linux)
+   /* On PPC64BE, ELF ver 1, a func ptr is represented by a TOC entry ptr.
+      This TOC entry contains three words; the first word is the function
       address, the second word is the TOC ptr (r2), and the third word
       is the static chain value. */
    info->init_ip  = ((ULong*)entry)[0];
    info->init_toc = ((ULong*)entry)[1];
    info->init_ip  += info->interp_offset;
    info->init_toc += info->interp_offset;
+#elif defined(VGP_ppc64le_linux)
+   /* On PPC64LE, ELF ver 2. API doesn't use a func ptr */
+   info->init_ip  = (Addr)entry;
+   info->init_toc = 0; /* meaningless on this platform */
 #else
    info->init_ip  = (Addr)entry;
    info->init_toc = 0; /* meaningless on this platform */

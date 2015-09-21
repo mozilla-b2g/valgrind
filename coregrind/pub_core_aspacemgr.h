@@ -58,33 +58,31 @@
    Takes a pointer to the SP at the time V gained control.  This is
    taken to be the highest usable address (more or less).  Based on
    that (and general consultation of tea leaves, etc) return a
-   suggested end address for the client's stack. */
+   suggested end address (highest addressable byte) for the client's stack. */
 extern Addr VG_(am_startup) ( Addr sp_at_startup );
 
+/* Check whether ADDR is OK to be used as aspacem_minAddr. If not, *ERRMSG
+   will be set to identify what's wrong. ERRMSG may be NULL. */
+extern Bool VG_(am_is_valid_for_aspacem_minAddr)( Addr addr,
+                                                  const HChar **errmsg );
 
 //--------------------------------------------------------------
 // Querying current status
 
-/* Finds the segment containing 'a'.  Only returns file/anon/resvn
-   segments.  This returns a 'NSegment const *' - a pointer to
-   readonly data. */
-// Is in tool-visible header file.
-// extern NSegment const * VG_(am_find_nsegment) ( Addr a );
 
 /* Find the next segment along from 'here', if it is a file/anon/resvn
    segment. */
 extern NSegment const* VG_(am_next_nsegment) ( const NSegment* here,
                                                Bool fwds );
 
-/* Is the area [start .. start+len-1] validly accessible by the 
-   client with at least the permissions 'prot' ?  To find out
-   simply if said area merely belongs to the client, pass 
+/* Is the area [start .. start+len-1] validly accessible by
+   valgrind with at least the permissions 'prot' ?  To find out
+   simply if said area merely belongs to valgrind, pass 
    VKI_PROT_NONE as 'prot'.  Will return False if any part of the
-   area does not belong to the client or does not have at least
+   area does not belong to valgrind or does not have at least
    the stated permissions. */
-// Is in tool-visible header file.
-// extern Bool VG_(am_is_valid_for_client)
-//   ( Addr start, SizeT len, UInt prot );
+extern Bool VG_(am_is_valid_for_valgrind)
+   ( Addr start, SizeT len, UInt prot );
 
 /* Variant of VG_(am_is_valid_for_client) which allows free areas to
    be consider part of the client's addressable space.  It also
@@ -93,6 +91,10 @@ extern NSegment const* VG_(am_next_nsegment) ( const NSegment* here,
 extern Bool VG_(am_is_valid_for_client_or_free_or_resvn)
    ( Addr start, SizeT len, UInt prot );
 
+/* Check whether ADDR looks like an address or address-to-be located in an
+   extensible client stack segment. */
+extern Bool VG_(am_addr_is_in_extensible_client_stack)( Addr addr );
+
 /* Trivial fn: return the total amount of space in anonymous mappings,
    both for V and the client.  Is used for printing stats in
    out-of-memory messages. */
@@ -100,15 +102,6 @@ extern ULong VG_(am_get_anonsize_total)( void );
 
 /* Show the segment array on the debug log, at given loglevel. */
 extern void VG_(am_show_nsegments) ( Int logLevel, const HChar* who );
-
-/* Get the filename corresponding to this segment, if known and if it
-   has one.  The returned name's storage cannot be assumed to be
-   persistent, so the caller should immediately copy the name
-   elsewhere.  This may return NULL if the file name is not known or
-   for arbitrary other implementation-dependent reasons, so callers
-   need to be able to handle a NULL return value. */
-// Is in tool-visible header file.
-// extern HChar* VG_(am_get_filename)( NSegment* );
 
 /* VG_(am_get_segment_starts) is also part of this section, but its
    prototype is tool-visible, hence not in this header file. */
@@ -143,7 +136,7 @@ typedef
    set to False, it means aspacem has vetoed the mapping, and so the
    caller should not proceed with it. */
 extern Addr VG_(am_get_advisory)
-   ( MapRequest* req, Bool forClient, /*OUT*/Bool* ok );
+   ( const MapRequest* req, Bool forClient, /*OUT*/Bool* ok );
 
 /* Convenience wrapper for VG_(am_get_advisory) for client floating or
    fixed requests.  If start is zero, a floating request is issued; if
@@ -189,7 +182,7 @@ extern Bool VG_(am_notify_mprotect)( Addr start, SizeT len, UInt prot );
 
 /* Notifies aspacem that an munmap completed successfully.  The
    segment array is updated accordingly.  As with
-   VG_(am_notify_munmap), we merely record the given info, and don't
+   VG_(am_notify_mprotect), we merely record the given info, and don't
    check it for sensibleness.  If the returned Bool is True, the
    caller should immediately discard translations from the specified
    address range. */
@@ -229,26 +222,10 @@ extern SysRes VG_(am_mmap_anon_fixed_client)
    update the segment array accordingly.  */
 extern SysRes VG_(am_mmap_anon_float_client) ( SizeT length, Int prot );
 
-/* Similarly, acquire new address space for the client but with
-   considerable restrictions on what can be done with it: (1) the
-   actual protections may exceed those stated in 'prot', (2) the
-   area's protections cannot be later changed using any form of
-   mprotect, and (3) the area cannot be freed using any form of
-   munmap.  On Linux this behaves the same as
-   VG_(am_mmap_anon_float_client).  On AIX5 this *may* allocate memory
-   by using sbrk, so as to make use of large pages on AIX. */
-extern SysRes VG_(am_sbrk_anon_float_client) ( SizeT length, Int prot );
-
-
 /* Map anonymously at an unconstrained address for V, and update the
    segment array accordingly.  This is fundamentally how V allocates
    itself more address space when needed. */
 extern SysRes VG_(am_mmap_anon_float_valgrind)( SizeT cszB );
-
-/* Same comments apply as per VG_(am_sbrk_anon_float_client).  On
-   Linux this behaves the same as VG_(am_mmap_anon_float_valgrind). */
-extern SysRes VG_(am_sbrk_anon_float_valgrind)( SizeT cszB );
-
 
 /* Map privately a file at an unconstrained address for V, and update the
    segment array accordingly.  This is used by V for transiently
@@ -261,6 +238,10 @@ extern SysRes VG_(am_mmap_file_float_valgrind)
    with vgdb.  */
 extern SysRes VG_(am_shared_mmap_file_float_valgrind)
    ( SizeT length, UInt prot, Int fd, Off64T offset );
+
+/* Convenience wrapper around VG_(am_mmap_anon_float_client) which also
+   marks the segment as containing the client heap. */
+extern SysRes VG_(am_mmap_client_heap) ( SizeT length, Int prot );
 
 /* Unmap the given address range and update the segment array
    accordingly.  This fails if the range isn't valid for the client.
@@ -276,18 +257,10 @@ extern SysRes VG_(am_munmap_client)( /*OUT*/Bool* need_discard,
   suitable segment. */
 extern Bool VG_(am_change_ownership_v_to_c)( Addr start, SizeT len );
 
-/* 'seg' must be NULL or have been obtained from
-   VG_(am_find_nsegment), and still valid.  If non-NULL, and if it
-   denotes a SkAnonC (anonymous client mapping) area, set the .isCH
-   (is-client-heap) flag for that area.  Otherwise do nothing.
-   (Bizarre interface so that the same code works for both Linux and
-   AIX and does not impose inefficiencies on the Linux version.) */
-extern void VG_(am_set_segment_isCH_if_SkAnonC)( const NSegment* seg );
-
-/* Same idea as VG_(am_set_segment_isCH_if_SkAnonC), except set the
-   segment's hasT bit (has-cached-code) if this is SkFileC or SkAnonC
-   segment. */
-extern void VG_(am_set_segment_hasT_if_SkFileC_or_SkAnonC)( const NSegment* );
+/* Set the 'hasT' bit on the segment containing ADDR indicating that
+   translations have or may have been taken from this segment. ADDR is
+   expected to belong to a client segment. */
+extern void VG_(am_set_segment_hasT)( Addr addr );
 
 /* --- --- --- reservations --- --- --- */
 
@@ -302,8 +275,8 @@ extern void VG_(am_set_segment_hasT_if_SkFileC_or_SkAnonC)( const NSegment* );
 extern Bool VG_(am_create_reservation) 
    ( Addr start, SizeT length, ShrinkMode smode, SSizeT extra );
 
-/* Let SEG be an anonymous client mapping.  This fn extends the
-   mapping by DELTA bytes, taking the space from a reservation section
+/* ADDR is the start address of an anonymous client mapping.  This fn extends
+   the mapping by DELTA bytes, taking the space from a reservation section
    which must be adjacent.  If DELTA is positive, the segment is
    extended forwards in the address space, and the reservation must be
    the next one along.  If DELTA is negative, the segment is extended
@@ -311,21 +284,17 @@ extern Bool VG_(am_create_reservation)
    previous one.  DELTA must be page aligned.  abs(DELTA) must not
    exceed the size of the reservation segment minus one page, that is,
    the reservation segment after the operation must be at least one
-   page long. */
-extern Bool VG_(am_extend_into_adjacent_reservation_client) 
-   ( const NSegment* seg, SSizeT delta );
+   page long. The function returns a pointer to the resized segment. */
+extern const NSegment *VG_(am_extend_into_adjacent_reservation_client) 
+   ( Addr addr, SSizeT delta, /*OUT*/Bool *overflow );
 
 /* --- --- --- resizing/move a mapping --- --- --- */
 
-/* Let SEG be a client mapping (anonymous or file).  This fn extends
-   the mapping forwards only by DELTA bytes, and trashes whatever was
-   in the new area.  Fails if SEG is not a single client mapping or if
-   the new area is not accessible to the client.  Fails if DELTA is
-   not page aligned.  *seg is invalid after a successful return.  If
-   *need_discard is True after a successful return, the caller should
-   immediately discard translations from the new area. */
-extern Bool VG_(am_extend_map_client)( /*OUT*/Bool* need_discard,
-                                       const NSegment* seg, SizeT delta );
+/* This function grows a client mapping in place into an adjacent free segment.
+   ADDR is the client mapping's start address and DELTA, which must be page
+   aligned, is the growth amount. The function returns a pointer to the
+   resized segment. The function is used in support of mremap. */
+extern const NSegment *VG_(am_extend_map_client)( Addr addr, SizeT delta );
 
 /* Remap the old address range to the new address range.  Fails if any
    parameter is not page aligned, if the either size is zero, if any
@@ -344,26 +313,26 @@ extern Bool VG_(am_relocate_nooverlap_client)( /*OUT*/Bool* need_discard,
 // stacks.  The address space manager provides and suitably
 // protects such stacks.
 
-#if defined(VGP_ppc32_linux) || defined(VGP_ppc64_linux) \
+// VG_DEFAULT_STACK_ACTIVE_SZB is the default size of a Valgrind stack.
+// The effectively used size is controlled by the command line options
+// --valgrind-stack-size=xxxx (which must be page aligned).
+// Note that m_main.c needs an interim stack (just to startup), before
+// any command line option can be processed. This interim stack
+// (declared in m_main.c) will use the size VG_DEFAULT_STACK_ACTIVE_SZB.
+#if defined(VGP_ppc32_linux) \
+    || defined(VGP_ppc64be_linux) || defined(VGP_ppc64le_linux)	\
     || defined(VGP_mips32_linux) || defined(VGP_mips64_linux) \
-    || defined(VGP_arm64_linux)
+    || defined(VGP_arm64_linux) || defined(VGP_tilegx_linux)
 # define VG_STACK_GUARD_SZB  65536  // 1 or 16 pages
-# define VG_STACK_ACTIVE_SZB (4096 * 256) // 1Mb
 #else
 # define VG_STACK_GUARD_SZB  8192   // 2 pages
-# define VG_STACK_ACTIVE_SZB (4096 * 256) // 1Mb
 #endif
+# define VG_DEFAULT_STACK_ACTIVE_SZB 1048576 // (4096 * 256) = 1Mb 
 
-typedef
-   struct {
-      HChar bytes[VG_STACK_GUARD_SZB 
-                  + VG_STACK_ACTIVE_SZB 
-                  + VG_STACK_GUARD_SZB];
-   }
-   VgStack;
+typedef struct _VgStack VgStack;
 
 
-/* Allocate and initialise a VgStack (anonymous client space).
+/* Allocate and initialise a VgStack (anonymous valgrind space).
    Protect the stack active area and the guard areas appropriately.
    Returns NULL on failure, else the address of the bottom of the
    stack.  On success, also sets *initial_sp to what the stack pointer
@@ -374,7 +343,8 @@ extern VgStack* VG_(am_alloc_VgStack)( /*OUT*/Addr* initial_sp );
 /* Figure out how many bytes of the stack's active area have not been
    used.  Used for estimating if we are close to overflowing it.  If
    the free area is larger than 'limit', just return 'limit'. */
-extern SizeT VG_(am_get_VgStack_unused_szB)( VgStack* stack, SizeT limit ); 
+extern SizeT VG_(am_get_VgStack_unused_szB)( const VgStack* stack,
+                                             SizeT limit ); 
 
 // DDD: this is ugly
 #if defined(VGO_darwin)

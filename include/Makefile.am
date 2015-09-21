@@ -4,14 +4,17 @@
 nobase_pkginclude_HEADERS = \
 	pub_tool_basics.h 		\
 	pub_tool_basics_asm.h 		\
+	pub_tool_addrinfo.h 		\
 	pub_tool_aspacehl.h 		\
 	pub_tool_aspacemgr.h 		\
 	pub_tool_clientstate.h		\
 	pub_tool_clreq.h		\
+	pub_tool_deduppoolalloc.h	\
 	pub_tool_debuginfo.h 		\
 	pub_tool_errormgr.h 		\
 	pub_tool_execontext.h 		\
 	pub_tool_gdbserver.h 		\
+	pub_tool_guest.h 		\
 	pub_tool_poolalloc.h 		\
 	pub_tool_hashtable.h 		\
 	pub_tool_libcbase.h 		\
@@ -25,6 +28,7 @@ nobase_pkginclude_HEADERS = \
 	pub_tool_mallocfree.h 		\
 	pub_tool_options.h 		\
 	pub_tool_oset.h 		\
+	pub_tool_rangemap.h		\
 	pub_tool_redir.h		\
 	pub_tool_replacemalloc.h	\
 	pub_tool_seqmatch.h		\
@@ -33,6 +37,7 @@ nobase_pkginclude_HEADERS = \
 	pub_tool_stacktrace.h 		\
 	pub_tool_threadstate.h 		\
 	pub_tool_tooliface.h 		\
+	pub_tool_transtab.h 		\
 	pub_tool_vki.h			\
 	pub_tool_vkiscnums.h		\
 	pub_tool_vkiscnums_asm.h	\
@@ -42,6 +47,7 @@ nobase_pkginclude_HEADERS = \
 	vki/vki-linux.h			\
 	vki/vki-darwin.h		\
 	vki/vki-posixtypes-amd64-linux.h \
+	vki/vki-posixtypes-arm64-linux.h \
 	vki/vki-posixtypes-ppc32-linux.h \
 	vki/vki-posixtypes-ppc64-linux.h \
 	vki/vki-posixtypes-x86-linux.h	 \
@@ -50,6 +56,7 @@ nobase_pkginclude_HEADERS = \
 	vki/vki-posixtypes-mips32-linux.h \
 	vki/vki-posixtypes-mips64-linux.h \
 	vki/vki-amd64-linux.h		\
+	vki/vki-arm64-linux.h		\
 	vki/vki-ppc32-linux.h		\
 	vki/vki-ppc64-linux.h		\
 	vki/vki-x86-linux.h		\
@@ -58,6 +65,7 @@ nobase_pkginclude_HEADERS = \
 	vki/vki-mips32-linux.h		\
 	vki/vki-mips64-linux.h		\
 	vki/vki-scnums-amd64-linux.h	\
+	vki/vki-scnums-arm64-linux.h	\
 	vki/vki-scnums-ppc32-linux.h	\
 	vki/vki-scnums-ppc64-linux.h	\
 	vki/vki-scnums-x86-linux.h	\
@@ -74,6 +82,7 @@ nobase_pkginclude_HEADERS = \
 	vki/vki-xen-memory.h		\
 	vki/vki-xen-mmuext.h		\
 	vki/vki-xen-sysctl.h		\
+	vki/vki-xen-tmem.h		\
 	vki/vki-xen-version.h		\
 	vki/vki-xen-x86.h		\
 	vki/vki-linux-drm.h

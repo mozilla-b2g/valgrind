@@ -1,3 +1,4 @@
+/* -*- mode: C; c-basic-offset: 3; -*- */
 
 /*--------------------------------------------------------------------*/
 /*--- Implementation of POSIX signals.                 m_signals.c ---*/
@@ -202,7 +203,6 @@
 #include "pub_core_vki.h"
 #include "pub_core_vkiscnums.h"
 #include "pub_core_debuglog.h"
-#include "pub_core_libcsetjmp.h"    // to keep _threadstate.h happy
 #include "pub_core_threadstate.h"
 #include "pub_core_xarray.h"
 #include "pub_core_clientstate.h"
@@ -348,7 +348,7 @@ typedef struct SigQueue {
         (srP)->misc.PPC32.r_lr = (uc)->uc_regs->mc_gregs[VKI_PT_LNK]; \
       }
 
-#elif defined(VGP_ppc64_linux)
+#elif defined(VGP_ppc64be_linux) || defined(VGP_ppc64le_linux)
 #  define VG_UCONTEXT_INSTR_PTR(uc)  ((uc)->uc_mcontext.gp_regs[VKI_PT_NIP])
 #  define VG_UCONTEXT_STACK_PTR(uc)  ((uc)->uc_mcontext.gp_regs[VKI_PT_R1])
    /* Dubious hack: if there is an error, only consider the lowest 8
@@ -566,8 +566,21 @@ typedef struct SigQueue {
         (srP)->misc.MIPS64.r31 = (uc)->uc_mcontext.sc_regs[31]; \
         (srP)->misc.MIPS64.r28 = (uc)->uc_mcontext.sc_regs[28]; \
       }
-
-#else 
+#elif defined(VGP_tilegx_linux)
+#  define VG_UCONTEXT_INSTR_PTR(uc)       ((uc)->uc_mcontext.pc)
+#  define VG_UCONTEXT_STACK_PTR(uc)       ((uc)->uc_mcontext.sp)
+#  define VG_UCONTEXT_FRAME_PTR(uc)       ((uc)->uc_mcontext.gregs[52])
+#  define VG_UCONTEXT_SYSCALL_NUM(uc)     ((uc)->uc_mcontext.gregs[10])
+#  define VG_UCONTEXT_SYSCALL_SYSRES(uc)                            \
+      /* Convert the value in uc_mcontext.rax into a SysRes. */     \
+      VG_(mk_SysRes_tilegx_linux)((uc)->uc_mcontext.gregs[0])
+#  define VG_UCONTEXT_TO_UnwindStartRegs(srP, uc)              \
+      { (srP)->r_pc = (uc)->uc_mcontext.pc;                    \
+        (srP)->r_sp = (uc)->uc_mcontext.sp;                    \
+        (srP)->misc.TILEGX.r52 = (uc)->uc_mcontext.gregs[52];  \
+        (srP)->misc.TILEGX.r55 = (uc)->uc_mcontext.lr;         \
+      }
+#else
 #  error Unknown platform
 #endif
 
@@ -575,7 +588,7 @@ typedef struct SigQueue {
 /* ------ Macros for pulling stuff out of siginfos ------ */
 
 /* These macros allow use of uniform names when working with
-   both the Linux and AIX vki definitions. */
+   both the Linux and Darwin vki definitions. */
 #if defined(VGO_linux)
 #  define VKI_SIGINFO_si_addr  _sifields._sigfault._addr
 #  define VKI_SIGINFO_si_pid   _sifields._kill._pid
@@ -681,12 +694,15 @@ static SKSS skss;
 
 /* returns True if signal is to be ignored. 
    To check this, possibly call gdbserver with tid. */
-static Bool is_sig_ign(Int sigNo, ThreadId tid)
+static Bool is_sig_ign(vki_siginfo_t *info, ThreadId tid)
 {
-   vg_assert(sigNo >= 1 && sigNo <= _VKI_NSIG);
+   vg_assert(info->si_signo >= 1 && info->si_signo <= _VKI_NSIG);
 
-   return scss.scss_per_sig[sigNo].scss_handler == VKI_SIG_IGN
-      || !VG_(gdbserver_report_signal) (sigNo, tid);
+   /* If VG_(gdbserver_report_signal) tells to report the signal,
+      then verify if this signal is not to be ignored. GDB might have
+      modified si_signo, so we check after the call to gdbserver. */
+   return !VG_(gdbserver_report_signal) (info, tid)
+      || scss.scss_per_sig[info->si_signo].scss_handler == VKI_SIG_IGN;
 }
 
 /* ---------------------------------------------------------------------
@@ -851,7 +867,7 @@ extern void my_sigreturn(void);
    "	sc\n" \
    ".previous\n"
 
-#elif defined(VGP_ppc64_linux)
+#elif defined(VGP_ppc64be_linux)
 #  define _MY_SIGRETURN(name) \
    ".align   2\n" \
    ".globl   my_sigreturn\n" \
@@ -865,6 +881,23 @@ extern void my_sigreturn(void);
    ".my_sigreturn:\n" \
    "	li	0, " #name "\n" \
    "	sc\n"
+
+#elif defined(VGP_ppc64le_linux)
+/* Little Endian supports ELF version 2.  In the future, it may
+ * support other versions.
+ */
+#  define _MY_SIGRETURN(name) \
+   ".align   2\n" \
+   ".globl   my_sigreturn\n" \
+   ".type    .my_sigreturn,@function\n" \
+   "my_sigreturn:\n" \
+   "#if _CALL_ELF == 2 \n" \
+   "0: addis        2,12,.TOC.-0b@ha\n" \
+   "   addi         2,2,.TOC.-0b@l\n" \
+   "   .localentry my_sigreturn,.-my_sigreturn\n" \
+   "#endif \n" \
+   "   sc\n" \
+   "   .size my_sigreturn,.-my_sigreturn\n"
 
 #elif defined(VGP_arm_linux)
 #  define _MY_SIGRETURN(name) \
@@ -922,6 +955,14 @@ extern void my_sigreturn(void);
    "my_sigreturn:\n" \
    "   li $2, " #name "\n" \
    "   syscall\n" \
+   ".previous\n"
+
+#elif defined(VGP_tilegx_linux)
+#  define _MY_SIGRETURN(name) \
+   ".text\n" \
+   "my_sigreturn:\n" \
+   " moveli r10 ," #name "\n" \
+   " swint1\n" \
    ".previous\n"
 
 #else
@@ -1202,7 +1243,7 @@ void do_sigprocmask_bitops ( Int vki_how,
 static
 HChar* format_sigset ( const vki_sigset_t* set )
 {
-   static HChar buf[128];
+   static HChar buf[_VKI_NSIG_WORDS * 16 + 1];
    int w;
 
    VG_(strcpy)(buf, "");
@@ -1311,7 +1352,7 @@ void VG_(clear_out_queued_signals)( ThreadId tid, vki_sigset_t* saved_mask )
 {
    block_all_host_signals(saved_mask);
    if (VG_(threads)[tid].sig_queue != NULL) {
-      VG_(arena_free)(VG_AR_CORE, VG_(threads)[tid].sig_queue);
+      VG_(free)(VG_(threads)[tid].sig_queue);
       VG_(threads)[tid].sig_queue = NULL;
    }
    restore_all_host_signals(saved_mask);
@@ -1383,7 +1424,7 @@ void push_signal_frame ( ThreadId tid, const vki_siginfo_t *siginfo,
 
 const HChar *VG_(signame)(Int sigNo)
 {
-   static HChar buf[20];
+   static HChar buf[20];  // large enough
 
    switch(sigNo) {
       case VKI_SIGHUP:    return "SIGHUP";
@@ -1598,7 +1639,7 @@ static void default_action(const vki_siginfo_t *info, ThreadId tid)
 	 core = False;
    }
 
-   if ( (VG_(clo_verbosity) > 1 ||
+   if ( (VG_(clo_verbosity) >= 1 ||
          (could_core && is_signal_from_kernel(tid, sigNo, info->si_code))
         ) &&
         !VG_(clo_xml) ) {
@@ -1630,7 +1671,7 @@ static void default_action(const vki_siginfo_t *info, ThreadId tid)
 	    }
 #if 0
             {
-              HChar buf[110];
+              HChar buf[50];  // large enough
               VG_(am_show_nsegments)(0,"post segfault");
               VG_(sprintf)(buf, "/bin/cat /proc/%d/maps", VG_(getpid)());
               VG_(system)(buf);
@@ -1698,7 +1739,8 @@ static void default_action(const vki_siginfo_t *info, ThreadId tid)
          if (tid == 1) {           // main thread
             Addr esp  = VG_(get_SP)(tid);
             Addr base = VG_PGROUNDDN(esp - VG_STACK_REDZONE_SZB);
-            if (VG_(extend_stack)(base, VG_(threads)[tid].client_stack_szB)) {
+            if (VG_(am_addr_is_in_extensible_client_stack)(base) &&
+                VG_(extend_stack)(tid, base)) {
                if (VG_(clo_trace_signals))
                   VG_(dmsg)("       -> extended stack base to %#lx\n",
                             VG_PGROUNDDN(esp));
@@ -1743,12 +1785,19 @@ static void default_action(const vki_siginfo_t *info, ThreadId tid)
       }
    }
 
+   if (VG_(clo_vgdb) != Vg_VgdbNo
+       && VG_(dyn_vgdb_error) <= VG_(get_n_errs_shown)() + 1) {
+      /* Note: we add + 1 to n_errs_shown as the fatal signal was not
+         reported through error msg, and so was not counted. */
+      VG_(gdbserver_report_fatal_signal) (info, tid);
+   }
+
    if (VG_(is_action_requested)( "Attach to debugger", & VG_(clo_db_attach) )) {
       VG_(start_debugger)( tid );
    }
 
    if (core) {
-      const static struct vki_rlimit zero = { 0, 0 };
+      static const struct vki_rlimit zero = { 0, 0 };
 
       VG_(make_coredump)(tid, info, corelim.rlim_cur);
 
@@ -1876,7 +1925,7 @@ static void synth_fault_common(ThreadId tid, Addr addr, Int si_code)
 
    /* Even if gdbserver indicates to ignore the signal, we must deliver it.
       So ignore the return value of VG_(gdbserver_report_signal). */
-   (void) VG_(gdbserver_report_signal) (VKI_SIGSEGV, tid);
+   (void) VG_(gdbserver_report_signal) (&info, tid);
 
    /* If they're trying to block the signal, force it to be delivered */
    if (VG_(sigismember)(&VG_(threads)[tid].sig_mask, VKI_SIGSEGV))
@@ -1916,7 +1965,7 @@ void VG_(synth_sigill)(ThreadId tid, Addr addr)
    info.si_code  = VKI_ILL_ILLOPC; /* jrs: no idea what this should be */
    info.VKI_SIGINFO_si_addr = (void*)addr;
 
-   if (VG_(gdbserver_report_signal) (VKI_SIGILL, tid)) {
+   if (VG_(gdbserver_report_signal) (&info, tid)) {
       resume_scheduler(tid);
       deliver_signal(tid, &info, NULL);
    }
@@ -1941,7 +1990,7 @@ void VG_(synth_sigbus)(ThreadId tid)
       in .si_addr.  Oh well. */
    /* info.VKI_SIGINFO_si_addr = (void*)addr; */
 
-   if (VG_(gdbserver_report_signal) (VKI_SIGBUS, tid)) {
+   if (VG_(gdbserver_report_signal) (&info, tid)) {
       resume_scheduler(tid);
       deliver_signal(tid, &info, NULL);
    }
@@ -1981,7 +2030,7 @@ void VG_(synth_sigtrap)(ThreadId tid)
 #  endif
 
    /* fixs390: do we need to do anything here for s390 ? */
-   if (VG_(gdbserver_report_signal) (VKI_SIGTRAP, tid)) {
+   if (VG_(gdbserver_report_signal) (&info, tid)) {
       resume_scheduler(tid);
       deliver_signal(tid, &info, &uc);
    }
@@ -2035,8 +2084,7 @@ void queue_signal(ThreadId tid, const vki_siginfo_t *si)
    block_all_host_signals(&savedmask);
 
    if (tst->sig_queue == NULL) {
-      tst->sig_queue = VG_(arena_malloc)(VG_AR_CORE, "signals.qs.1",
-                                         sizeof(*tst->sig_queue));
+      tst->sig_queue = VG_(malloc)("signals.qs.1", sizeof(*tst->sig_queue));
       VG_(memset)(tst->sig_queue, 0, sizeof(*tst->sig_queue));
    }
    sq = tst->sig_queue;
@@ -2191,7 +2239,7 @@ void async_signalhandler ( Int sigNo,
 
    /* (2) */
    /* Set up the thread's state to deliver a signal */
-   if (!is_sig_ign(info->si_signo, tid))
+   if (!is_sig_ign(info, tid))
       deliver_signal(tid, info, uc);
 
    /* It's crucial that (1) and (2) happen in the order (1) then (2)
@@ -2215,7 +2263,9 @@ void async_signalhandler ( Int sigNo,
                    "while outside of scheduler");
 }
 
-/* Extend the stack to cover addr.  maxsize is the limit the stack can grow to.
+/* Extend the stack of thread #tid to cover addr. It is expected that
+   addr either points into an already mapped anonymous segment or into a
+   reservation segment abutting the stack segment. Everything else is a bug.
 
    Returns True on success, False on failure.
 
@@ -2223,42 +2273,43 @@ void async_signalhandler ( Int sigNo,
 
    Failure could be caused by:
    - addr not below a growable segment
-   - new stack size would exceed maxsize
+   - new stack size would exceed the stack limit for the given thread
    - mmap failed for some other reason
- */
-Bool VG_(extend_stack)(Addr addr, UInt maxsize)
+*/
+Bool VG_(extend_stack)(ThreadId tid, Addr addr)
 {
    SizeT udelta;
 
-   /* Find the next Segment above addr */
-   NSegment const* seg
-      = VG_(am_find_nsegment)(addr);
-   NSegment const* seg_next 
-      = seg ? VG_(am_next_nsegment)( seg, True/*fwds*/ )
-            : NULL;
+   /* Get the segment containing addr. */
+   const NSegment* seg = VG_(am_find_nsegment)(addr);
+   vg_assert(seg != NULL);
 
-   if (seg && seg->kind == SkAnonC)
+   /* TODO: the test "seg->kind == SkAnonC" is really inadequate,
+      because although it tests whether the segment is mapped
+      _somehow_, it doesn't check that it has the right permissions
+      (r,w, maybe x) ?  */
+   if (seg->kind == SkAnonC)
       /* addr is already mapped.  Nothing to do. */
       return True;
 
-   /* Check that the requested new base is in a shrink-down
-      reservation section which abuts an anonymous mapping that
-      belongs to the client. */
-   if ( ! (seg
-           && seg->kind == SkResvn
-           && seg->smode == SmUpper
-           && seg_next
-           && seg_next->kind == SkAnonC
-           && seg->end+1 == seg_next->start))
-      return False;
+   const NSegment* seg_next = VG_(am_next_nsegment)( seg, True/*fwds*/ );
+   vg_assert(seg_next != NULL);
 
    udelta = VG_PGROUNDUP(seg_next->start - addr);
+
    VG_(debugLog)(1, "signals", 
                     "extending a stack base 0x%llx down by %lld\n",
                     (ULong)seg_next->start, (ULong)udelta);
+   Bool overflow;
    if (! VG_(am_extend_into_adjacent_reservation_client)
-            ( seg_next, -(SSizeT)udelta )) {
-      VG_(debugLog)(1, "signals", "extending a stack base: FAILED\n");
+       ( seg_next->start, -(SSizeT)udelta, &overflow )) {
+      Addr new_stack_base = seg_next->start - udelta;
+      if (overflow)
+         VG_(umsg)("Stack overflow in thread #%d: can't grow stack to %#lx\n",
+                   tid, new_stack_base);
+      else
+         VG_(umsg)("Cannot map memory to grow the stack for thread #%d "
+                   "to %#lx\n", tid, new_stack_base);
       return False;
    }
 
@@ -2379,8 +2430,7 @@ static Bool extend_stack_if_appropriate(ThreadId tid, vki_siginfo_t* info)
 {
    Addr fault;
    Addr esp;
-   NSegment const* seg;
-   NSegment const* seg_next;
+   NSegment const *seg, *seg_next;
 
    if (info->si_signo != VKI_SIGSEGV)
       return False;
@@ -2408,7 +2458,6 @@ static Bool extend_stack_if_appropriate(ThreadId tid, vki_siginfo_t* info)
        && seg->smode == SmUpper
        && seg_next
        && seg_next->kind == SkAnonC
-       && seg->end+1 == seg_next->start
        && fault >= fault_mask(esp - VG_STACK_REDZONE_SZB)) {
       /* If the fault address is above esp but below the current known
          stack segment base, and it was a fault because there was
@@ -2416,14 +2465,13 @@ static Bool extend_stack_if_appropriate(ThreadId tid, vki_siginfo_t* info)
          then extend the stack segment. 
        */
       Addr base = VG_PGROUNDDN(esp - VG_STACK_REDZONE_SZB);
-      if (VG_(extend_stack)(base, VG_(threads)[tid].client_stack_szB)) {
+      if (VG_(am_addr_is_in_extensible_client_stack)(base) &&
+          VG_(extend_stack)(tid, base)) {
          if (VG_(clo_trace_signals))
             VG_(dmsg)("       -> extended stack base to %#lx\n",
                       VG_PGROUNDDN(fault));
          return True;
       } else {
-         VG_(umsg)("Stack overflow in thread %d: can't grow stack to %#lx\n",
-                   tid, fault);
          return False;
       }
    } else {
@@ -2463,7 +2511,7 @@ void sync_signalhandler_from_kernel ( ThreadId tid,
       }
 
       if (VG_(in_generated_code)) {
-         if (VG_(gdbserver_report_signal) (sigNo, tid)
+         if (VG_(gdbserver_report_signal) (info, tid)
              || VG_(sigismember)(&tst->sig_mask, sigNo)) {
             /* Can't continue; must longjmp back to the scheduler and thus
                enter the sighandler immediately. */
@@ -2669,7 +2717,7 @@ void VG_(poll_signals)(ThreadId tid)
       /* OK, something to do; deliver it */
       if (VG_(clo_trace_signals))
          VG_(dmsg)("Polling found signal %d for tid %d\n", sip->si_signo, tid);
-      if (!is_sig_ign(sip->si_signo, tid))
+      if (!is_sig_ign(sip, tid))
 	 deliver_signal(tid, sip, NULL);
       else if (VG_(clo_trace_signals))
          VG_(dmsg)("   signal %d ignored\n", sip->si_signo);

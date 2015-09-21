@@ -1,3 +1,4 @@
+/* -*- mode: C; c-basic-offset: 3; -*- */
 
 /*--------------------------------------------------------------------*/
 /*--- Launching valgrind                              m_launcher.c ---*/
@@ -51,7 +52,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <limits.h>             // PATH_MAX
 
 #ifndef EM_X86_64
 #define EM_X86_64 62    // elf.h doesn't define this on some older systems
@@ -59,6 +59,14 @@
 
 #ifndef EM_AARCH64
 #define EM_AARCH64 183  // ditto
+#endif
+
+#ifndef EM_PPC64
+#define EM_PPC64 21  // ditto
+#endif
+
+#ifndef EM_TILEGX
+#define EM_TILEGX 191
 #endif
 
 /* Report fatal errors */
@@ -153,24 +161,39 @@ static const char *select_platform(const char *clientname)
 
    if (header[0] == '#' && header[1] == '!') {
       int i = 2;
-      char *interp = (char *)header + 2;
 
+      STATIC_ASSERT(VKI_BINPRM_BUF_SIZE < sizeof header);
+      if (n_bytes > VKI_BINPRM_BUF_SIZE)
+         n_bytes = VKI_BINPRM_BUF_SIZE - 1;
+      header[n_bytes] = '\0';
+      char *eol = strchr(header, '\n');
+      if (eol != NULL)
+         *eol = '\0';
+ 
       // Skip whitespace.
-      while (1) {
-         if (i == n_bytes) return NULL;
-         if (' ' != header[i] && '\t' != header[i]) break;
+      while  (header[i] == ' '|| header[i] == '\t')
          i++;
-      }
 
       // Get the interpreter name.
-      interp = &header[i];
-      while (1) {
-         if (i == n_bytes) break;
-         if (isspace(header[i])) break;
-         i++;
+      const char *interp = header + i;
+
+      if (header[i] == '\0') {
+         // No interpreter was found; fall back to default shell
+#  if defined(VGPV_arm_linux_android) \
+      || defined(VGPV_x86_linux_android) \
+      || defined(VGPV_mips32_linux_android) \
+      || defined(VGPV_arm64_linux_android)
+         interp = "/system/bin/sh";
+#  else
+         interp = "/bin/sh";
+#  endif
+      } else {
+         while (header[i]) {
+            if (header[i] == ' ' || header[i] == '\t') break;
+            i++;
+         }
+         header[i] = '\0';
       }
-      if (i == n_bytes) return NULL;
-      header[i] = '\0';
 
       platform = select_platform(interp);
 
@@ -224,19 +247,28 @@ static const char *select_platform(const char *clientname)
                 (ehdr->e_ident[EI_OSABI] == ELFOSABI_SYSV ||
                  ehdr->e_ident[EI_OSABI] == ELFOSABI_LINUX)) {
                platform = "mips64-linux";
+            } else if (ehdr->e_machine == EM_TILEGX &&
+                (ehdr->e_ident[EI_OSABI] == ELFOSABI_SYSV ||
+                 ehdr->e_ident[EI_OSABI] == ELFOSABI_LINUX)) {
+               platform = "tilegx-linux";
             } else if (ehdr->e_machine == EM_AARCH64 &&
                 (ehdr->e_ident[EI_OSABI] == ELFOSABI_SYSV ||
                  ehdr->e_ident[EI_OSABI] == ELFOSABI_LINUX)) {
                platform = "arm64-linux";
+            } else if (ehdr->e_machine == EM_PPC64 &&
+                (ehdr->e_ident[EI_OSABI] == ELFOSABI_SYSV ||
+                 ehdr->e_ident[EI_OSABI] == ELFOSABI_LINUX)) {
+               platform = "ppc64le-linux";
             }
          } else if (header[EI_DATA] == ELFDATA2MSB) {
 #           if !defined(VGPV_arm_linux_android) \
                && !defined(VGPV_x86_linux_android) \
-               && !defined(VGPV_mips32_linux_android)
+               && !defined(VGPV_mips32_linux_android) \
+               && !defined(VGPV_arm64_linux_android)
             if (ehdr->e_machine == EM_PPC64 &&
                 (ehdr->e_ident[EI_OSABI] == ELFOSABI_SYSV ||
                  ehdr->e_ident[EI_OSABI] == ELFOSABI_LINUX)) {
-               platform = "ppc64-linux";
+               platform = "ppc64be-linux";
             } 
             else 
             if (ehdr->e_machine == EM_S390 &&
@@ -271,7 +303,7 @@ int main(int argc, char** argv, char** envp)
    const char *default_platform;
    const char *cp;
    char *toolfile;
-   char launcher_name[PATH_MAX+1];
+   const char *launcher_name;
    char* new_line;
    char** new_env;
 
@@ -309,21 +341,20 @@ int main(int argc, char** argv, char** envp)
    }
 
    /* Select a platform to use if we can't decide that by looking at
-      the executable (eg because it's a shell script).  Note that the
-      default_platform is not necessarily either the primary or
-      secondary build target.  Instead it's chosen to maximise the
-      chances that /bin/sh will work on it.  Hence for a primary
-      target of ppc64-linux we still choose ppc32-linux as the default
-      target, because on most ppc64-linux setups, the basic /bin,
-      /usr/bin, etc, stuff is built in 32-bit mode, not 64-bit
-      mode. */
+      the executable (eg because it's a shell script).  VG_PLATFORM is the
+      default_platform. Its value is defined in coregrind/Makefile.am and
+      typically it is the primary build target. Unless the primary build
+      target is not built is not built in which case VG_PLATFORM is the
+      secondary build target. */
    if ((0==strcmp(VG_PLATFORM,"x86-linux"))    ||
        (0==strcmp(VG_PLATFORM,"amd64-linux"))  ||
        (0==strcmp(VG_PLATFORM,"ppc32-linux"))  ||
-       (0==strcmp(VG_PLATFORM,"ppc64-linux"))  ||
+       (0==strcmp(VG_PLATFORM,"ppc64be-linux"))  ||
+       (0==strcmp(VG_PLATFORM,"ppc64le-linux"))  ||
        (0==strcmp(VG_PLATFORM,"arm-linux"))    ||
        (0==strcmp(VG_PLATFORM,"arm64-linux"))  ||
        (0==strcmp(VG_PLATFORM,"s390x-linux"))  ||
+       (0==strcmp(VG_PLATFORM,"tilegx-linux")) ||
        (0==strcmp(VG_PLATFORM,"mips32-linux")) ||
        (0==strcmp(VG_PLATFORM,"mips64-linux")))
       default_platform = VG_PLATFORM;
@@ -349,17 +380,34 @@ int main(int argc, char** argv, char** envp)
    /* Figure out the name of this executable (viz, the launcher), so
       we can tell stage2.  stage2 will use the name for recursive
       invocations of valgrind on child processes. */
-   memset(launcher_name, 0, PATH_MAX+1);
-   r = readlink("/proc/self/exe", launcher_name, PATH_MAX);
-   if (r == -1) {
-      /* If /proc/self/exe can't be followed, don't give up.  Instead
-         continue with an empty string for VALGRIND_LAUNCHER.  In the
-         sys_execve wrapper, this is tested, and if found to be empty,
-         fail the execve. */
-      fprintf(stderr, "valgrind: warning (non-fatal): "
-                      "readlink(\"/proc/self/exe\") failed.\n");
-      fprintf(stderr, "valgrind: continuing, however --trace-children=yes "
-                      "will not work.\n");
+   unsigned bufsiz = 0;
+   char *buf = NULL;
+
+   while (42) {
+      bufsiz += 500;
+      buf = realloc(buf, bufsiz);
+      if (buf == NULL)
+         barf("realloc of buf failed.");
+      r = readlink("/proc/self/exe", buf, bufsiz);
+      if (r == -1) {
+        /* If /proc/self/exe can't be followed, don't give up.  Instead
+           continue with an empty string for VALGRIND_LAUNCHER.  In the
+           sys_execve wrapper, this is tested, and if found to be empty,
+           fail the execve. */
+        fprintf(stderr, "valgrind: warning (non-fatal): "
+                "readlink(\"/proc/self/exe\") failed.\n");
+        fprintf(stderr, "valgrind: continuing, however --trace-children=yes "
+                "will not work.\n");
+        launcher_name = "";
+        break;
+      }
+      if (r == bufsiz) continue;   // buffer to small; retry
+
+      assert(r < bufsiz);   // paranoia
+
+      buf[r] = '\0';
+      launcher_name = buf;
+      break;
    }
 
    /* tediously augment the env: VALGRIND_LAUNCHER=launcher_name */

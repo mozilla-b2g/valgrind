@@ -34,6 +34,12 @@
 #ifndef __VKI_DARWIN_H
 #define __VKI_DARWIN_H
 
+/* struct __darwin_ucontext isn't fully declared without
+ * this definition.  It's crazy but there it is.  */
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 0500
+#endif
+
 #include <stdint.h>
 
 #define vki_int8_t int8_t
@@ -278,6 +284,9 @@ typedef uint32_t vki_u32;
 #define	VKI_F_GETLK	F_GETLK
 #define	VKI_F_SETLK	F_SETLK
 #define	VKI_F_SETLKW	F_SETLKW
+#if DARWIN_VERS >= DARWIN_10_10
+#define	VKI_F_SETLKWTIMEOUT F_SETLKWTIMEOUT
+#endif
 
 #define VKI_F_CHKCLEAN	F_CHKCLEAN
 #define VKI_F_PREALLOCATE	F_PREALLOCATE
@@ -290,6 +299,9 @@ typedef uint32_t vki_u32;
 #define VKI_F_LOG2PHYS	F_LOG2PHYS
 #define VKI_F_GETPATH	F_GETPATH
 #define VKI_F_ADDSIGS	F_ADDSIGS
+#if DARWIN_VERS >= DARWIN_10_9
+# define VKI_F_ADDFILESIGS  F_ADDFILESIGS
+#endif
 #define VKI_F_FULLFSYNC	F_FULLFSYNC
 #define VKI_F_PATHPKG_CHECK	F_PATHPKG_CHECK
 #define VKI_F_FREEZE_FS	F_FREEZE_FS
@@ -786,6 +798,7 @@ typedef
 #include <sys/event.h>
 
 #define vki_kevent kevent
+#define vki_kevent64 kevent64_s
 
 
 #include <sys/ev.h>
@@ -1057,5 +1070,21 @@ struct ByteRangeLockPB2
 
 //#define vki_errno_t
 typedef int vki_errno_t;
+
+
+/* necp stuff.  This doesn't appear to exist in any user space include
+   file. */
+#if DARWIN_VERS == DARWIN_10_10
+struct vki_necp_aggregate_result {
+   vki_u_int32_t field1;
+   unsigned int  field2;
+   vki_u_int32_t field3;
+   vki_u_int32_t field4;
+   vki_uuid_t    field5;
+   u_int32_t     field6;
+   u_int32_t     field7;
+};
+#endif /* DARWIN_VERS == DARWIN_10_10 */
+
 
 #endif

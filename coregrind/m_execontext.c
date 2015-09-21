@@ -36,8 +36,6 @@
 #include "pub_core_options.h"
 #include "pub_core_stacktrace.h"
 #include "pub_core_machine.h"       // VG_(get_IP)
-#include "pub_core_vki.h"           // To keep pub_core_threadstate.h happy
-#include "pub_core_libcsetjmp.h"    // Ditto
 #include "pub_core_threadstate.h"   // VG_(is_valid_tid)
 #include "pub_core_execontext.h"    // self
 
@@ -121,7 +119,7 @@ static ULong ec_cmpAlls;
 /*--- Exported functions.                                  ---*/
 /*------------------------------------------------------------*/
 
-static ExeContext* record_ExeContext_wrk2 ( Addr* ips, UInt n_ips ); /*fwds*/
+static ExeContext* record_ExeContext_wrk2 ( const Addr* ips, UInt n_ips );
 
 /* Initialise this subsystem. */
 static void init_ExeContext_storage ( void )
@@ -159,11 +157,13 @@ static void init_ExeContext_storage ( void )
 /* Print stats. */
 void VG_(print_ExeContext_stats) ( Bool with_stacktraces )
 {
+   Int i;
+   ULong total_n_ips;
+   ExeContext* ec;
+
    init_ExeContext_storage();
 
    if (with_stacktraces) {
-      Int i;
-      ExeContext* ec;
       VG_(message)(Vg_DebugMsg, "   exectx: Printing contexts stacktraces\n");
       for (i = 0; i < ec_htab_size; i++) {
          for (ec = ec_htab[i]; ec; ec = ec->chain) {
@@ -176,10 +176,17 @@ void VG_(print_ExeContext_stats) ( Bool with_stacktraces )
                    "   exectx: Printed %'llu contexts stacktraces\n",
                    ec_totstored);
    }
-
+   
+   total_n_ips = 0;
+   for (i = 0; i < ec_htab_size; i++) {
+      for (ec = ec_htab[i]; ec; ec = ec->chain)
+         total_n_ips += ec->n_ips;
+   }
    VG_(message)(Vg_DebugMsg, 
-      "   exectx: %'lu lists, %'llu contexts (avg %'llu per list)\n",
-      ec_htab_size, ec_totstored, ec_totstored / (ULong)ec_htab_size
+      "   exectx: %'lu lists, %'llu contexts (avg %3.2f per list)"
+      " (avg %3.2f IP per context)\n",
+      ec_htab_size, ec_totstored, (Double)ec_totstored / (Double)ec_htab_size,
+      (Double)total_n_ips / (Double)ec_htab_size
    );
    VG_(message)(Vg_DebugMsg, 
       "   exectx: %'llu searches, %'llu full compares (%'llu per 1000)\n",
@@ -203,7 +210,8 @@ void VG_(pp_ExeContext) ( ExeContext* ec )
 
 
 /* Compare two ExeContexts.  Number of callers considered depends on res. */
-Bool VG_(eq_ExeContext) ( VgRes res, ExeContext* e1, ExeContext* e2 )
+Bool VG_(eq_ExeContext) ( VgRes res, const ExeContext* e1,
+                          const ExeContext* e2 )
 {
    Int i;
 
@@ -211,7 +219,7 @@ Bool VG_(eq_ExeContext) ( VgRes res, ExeContext* e1, ExeContext* e2 )
       return False;
 
    // Must be at least one address in each trace.
-   tl_assert(e1->n_ips >= 1 && e2->n_ips >= 1);
+   vg_assert(e1->n_ips >= 1 && e2->n_ips >= 1);
 
    switch (res) {
    case Vg_LowRes:
@@ -266,7 +274,7 @@ static inline UWord ROLW ( UWord w, Int n )
    return w;
 }
 
-static UWord calc_hash ( Addr* ips, UInt n_ips, UWord htab_sz )
+static UWord calc_hash ( const Addr* ips, UInt n_ips, UWord htab_sz )
 {
    UInt  i;
    UWord hash = 0;
@@ -351,7 +359,7 @@ static ExeContext* record_ExeContext_wrk ( ThreadId tid, Word first_ip_delta,
    holds a proposed trace.  Find or allocate a suitable ExeContext.
    Note that callers must have done init_ExeContext_storage() before
    getting to this point. */
-static ExeContext* record_ExeContext_wrk2 ( Addr* ips, UInt n_ips )
+static ExeContext* record_ExeContext_wrk2 ( const Addr* ips, UInt n_ips )
 {
    Int         i;
    Bool        same;
@@ -362,7 +370,7 @@ static ExeContext* record_ExeContext_wrk2 ( Addr* ips, UInt n_ips )
 
    static UInt ctr = 0;
 
-   tl_assert(n_ips >= 1 && n_ips <= VG_(clo_backtrace_size));
+   vg_assert(n_ips >= 1 && n_ips <= VG_(clo_backtrace_size));
 
    /* Now figure out if we've seen this one before.  First hash it so
       as to determine the list number. */
@@ -379,12 +387,9 @@ static ExeContext* record_ExeContext_wrk2 ( Addr* ips, UInt n_ips )
    while (True) {
       if (list == NULL) break;
       ec_searchcmps++;
-      same = True;
-      for (i = 0; i < n_ips; i++) {
-         if (list->ips[i] != ips[i]) {
-            same = False;
-            break; 
-         }
+      same = list->n_ips == n_ips;
+      for (i = 0; i < n_ips && same ; i++) {
+         same = list->ips[i] == ips[i];
       }
       if (same) break;
       prev2 = prev;
@@ -470,12 +475,12 @@ StackTrace VG_(get_ExeContext_StackTrace) ( ExeContext* e ) {
    return e->ips;
 }  
 
-UInt VG_(get_ECU_from_ExeContext)( ExeContext* e ) {
+UInt VG_(get_ECU_from_ExeContext)( const ExeContext* e ) {
    vg_assert(VG_(is_plausible_ECU)(e->ecu));
    return e->ecu;
 }
 
-Int VG_(get_ExeContext_n_ips)( ExeContext* e ) {
+Int VG_(get_ExeContext_n_ips)( const ExeContext* e ) {
    vg_assert(e->n_ips >= 1);
    return e->n_ips;
 }
@@ -495,7 +500,7 @@ ExeContext* VG_(get_ExeContext_from_ECU)( UInt ecu )
    return NULL;
 }
 
-ExeContext* VG_(make_ExeContext_from_StackTrace)( Addr* ips, UInt n_ips )
+ExeContext* VG_(make_ExeContext_from_StackTrace)( const Addr* ips, UInt n_ips )
 {
    init_ExeContext_storage();
    return record_ExeContext_wrk2(ips, n_ips);

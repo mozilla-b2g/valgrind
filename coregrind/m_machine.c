@@ -29,7 +29,6 @@
 
 #include "pub_core_basics.h"
 #include "pub_core_vki.h"
-#include "pub_core_libcsetjmp.h"   // setjmp facilities
 #include "pub_core_threadstate.h"
 #include "pub_core_libcassert.h"
 #include "pub_core_libcbase.h"
@@ -81,7 +80,7 @@ void VG_(get_UnwindStartRegs) ( /*OUT*/UnwindStartRegs* regs,
    regs->r_sp = (ULong)VG_(threads)[tid].arch.vex.guest_GPR1;
    regs->misc.PPC32.r_lr
       = VG_(threads)[tid].arch.vex.guest_LR;
-#  elif defined(VGA_ppc64)
+#  elif defined(VGA_ppc64be) || defined(VGA_ppc64le)
    regs->r_pc = VG_(threads)[tid].arch.vex.guest_CIA;
    regs->r_sp = VG_(threads)[tid].arch.vex.guest_GPR1;
    regs->misc.PPC64.r_lr
@@ -106,9 +105,9 @@ void VG_(get_UnwindStartRegs) ( /*OUT*/UnwindStartRegs* regs,
    regs->r_pc = (ULong)VG_(threads)[tid].arch.vex.guest_IA;
    regs->r_sp = (ULong)VG_(threads)[tid].arch.vex.guest_SP;
    regs->misc.S390X.r_fp
-      = VG_(threads)[tid].arch.vex.guest_r11;
+      = VG_(threads)[tid].arch.vex.guest_FP;
    regs->misc.S390X.r_lr
-      = VG_(threads)[tid].arch.vex.guest_r14;
+      = VG_(threads)[tid].arch.vex.guest_LR;
 #  elif defined(VGA_mips32)
    regs->r_pc = VG_(threads)[tid].arch.vex.guest_PC;
    regs->r_sp = VG_(threads)[tid].arch.vex.guest_r29;
@@ -127,6 +126,13 @@ void VG_(get_UnwindStartRegs) ( /*OUT*/UnwindStartRegs* regs,
       = VG_(threads)[tid].arch.vex.guest_r31;
    regs->misc.MIPS64.r28
       = VG_(threads)[tid].arch.vex.guest_r28;
+#  elif defined(VGA_tilegx)
+   regs->r_pc = VG_(threads)[tid].arch.vex.guest_pc;
+   regs->r_sp = VG_(threads)[tid].arch.vex.guest_r54;
+   regs->misc.TILEGX.r52
+      = VG_(threads)[tid].arch.vex.guest_r52;
+   regs->misc.TILEGX.r55
+      = VG_(threads)[tid].arch.vex.guest_r55;
 #  else
 #    error "Unknown arch"
 #  endif
@@ -152,7 +158,7 @@ VG_(get_shadow_regs_area) ( ThreadId tid,
       case 1: src = (void*)(((Addr)&(tst->arch.vex_shadow1)) + offset); break;
       case 2: src = (void*)(((Addr)&(tst->arch.vex_shadow2)) + offset); break;
    }
-   tl_assert(src != NULL);
+   vg_assert(src != NULL);
    VG_(memcpy)( dst, src, size);
 }
 
@@ -176,7 +182,7 @@ VG_(set_shadow_regs_area) ( ThreadId tid,
       case 1: dst = (void*)(((Addr)&(tst->arch.vex_shadow1)) + offset); break;
       case 2: dst = (void*)(((Addr)&(tst->arch.vex_shadow2)) + offset); break;
    }
-   tl_assert(dst != NULL);
+   vg_assert(dst != NULL);
    VG_(memcpy)( dst, src, size);
 }
 
@@ -212,7 +218,7 @@ static void apply_to_GPs_of_tid(ThreadId tid, void (*f)(ThreadId,
    (*f)(tid, "R13", vex->guest_R13);
    (*f)(tid, "R14", vex->guest_R14);
    (*f)(tid, "R15", vex->guest_R15);
-#elif defined(VGA_ppc32) || defined(VGA_ppc64)
+#elif defined(VGA_ppc32) || defined(VGA_ppc64be) || defined(VGA_ppc64le)
    (*f)(tid, "GPR0" , vex->guest_GPR0 );
    (*f)(tid, "GPR1" , vex->guest_GPR1 );
    (*f)(tid, "GPR2" , vex->guest_GPR2 );
@@ -344,6 +350,63 @@ static void apply_to_GPs_of_tid(ThreadId tid, void (*f)(ThreadId,
    (*f)(tid, "x28", vex->guest_X28);
    (*f)(tid, "x29", vex->guest_X29);
    (*f)(tid, "x30", vex->guest_X30);
+#elif defined(VGA_tilegx)
+   (*f)(tid, "r0",  vex->guest_r0 );
+   (*f)(tid, "r1",  vex->guest_r1 );
+   (*f)(tid, "r2",  vex->guest_r2 );
+   (*f)(tid, "r3",  vex->guest_r3 );
+   (*f)(tid, "r4",  vex->guest_r4 );
+   (*f)(tid, "r5",  vex->guest_r5 );
+   (*f)(tid, "r6",  vex->guest_r6 );
+   (*f)(tid, "r7",  vex->guest_r7 );
+   (*f)(tid, "r8",  vex->guest_r8 );
+   (*f)(tid, "r9",  vex->guest_r9 );
+   (*f)(tid, "r10", vex->guest_r10);
+   (*f)(tid, "r11", vex->guest_r11);
+   (*f)(tid, "r12", vex->guest_r12);
+   (*f)(tid, "r13", vex->guest_r13);
+   (*f)(tid, "r14", vex->guest_r14);
+   (*f)(tid, "r15", vex->guest_r15);
+   (*f)(tid, "r16", vex->guest_r16);
+   (*f)(tid, "r17", vex->guest_r17);
+   (*f)(tid, "r18", vex->guest_r18);
+   (*f)(tid, "r19", vex->guest_r19);
+   (*f)(tid, "r20", vex->guest_r20);
+   (*f)(tid, "r21", vex->guest_r21);
+   (*f)(tid, "r22", vex->guest_r22);
+   (*f)(tid, "r23", vex->guest_r23);
+   (*f)(tid, "r24", vex->guest_r24);
+   (*f)(tid, "r25", vex->guest_r25);
+   (*f)(tid, "r26", vex->guest_r26);
+   (*f)(tid, "r27", vex->guest_r27);
+   (*f)(tid, "r28", vex->guest_r28);
+   (*f)(tid, "r29", vex->guest_r29);
+   (*f)(tid, "r30", vex->guest_r30);
+   (*f)(tid, "r31", vex->guest_r31);
+   (*f)(tid, "r32", vex->guest_r32);
+   (*f)(tid, "r33", vex->guest_r33);
+   (*f)(tid, "r34", vex->guest_r34);
+   (*f)(tid, "r35", vex->guest_r35);
+   (*f)(tid, "r36", vex->guest_r36);
+   (*f)(tid, "r37", vex->guest_r37);
+   (*f)(tid, "r38", vex->guest_r38);
+   (*f)(tid, "r39", vex->guest_r39);
+   (*f)(tid, "r40", vex->guest_r40);
+   (*f)(tid, "r41", vex->guest_r41);
+   (*f)(tid, "r42", vex->guest_r42);
+   (*f)(tid, "r43", vex->guest_r43);
+   (*f)(tid, "r44", vex->guest_r44);
+   (*f)(tid, "r45", vex->guest_r45);
+   (*f)(tid, "r46", vex->guest_r46);
+   (*f)(tid, "r47", vex->guest_r47);
+   (*f)(tid, "r48", vex->guest_r48);
+   (*f)(tid, "r49", vex->guest_r49);
+   (*f)(tid, "r50", vex->guest_r50);
+   (*f)(tid, "r51", vex->guest_r51);
+   (*f)(tid, "r52", vex->guest_r52);
+   (*f)(tid, "r53", vex->guest_r53);
+   (*f)(tid, "r54", vex->guest_r54);
+   (*f)(tid, "r55", vex->guest_r55);
 #else
 #  error Unknown arch
 #endif
@@ -380,7 +443,7 @@ Bool VG_(thread_stack_next)(/*MOD*/ThreadId* tid,
       if (VG_(threads)[i].status != VgTs_Empty) {
          *tid       = i;
          *stack_min = VG_(get_SP)(i);
-         *stack_max = VG_(threads)[i].client_stack_highest_word;
+         *stack_max = VG_(threads)[i].client_stack_highest_byte;
          return True;
       }
    }
@@ -391,7 +454,7 @@ Addr VG_(thread_get_stack_max)(ThreadId tid)
 {
    vg_assert(0 <= tid && tid < VG_N_THREADS && tid != VG_INVALID_THREADID);
    vg_assert(VG_(threads)[tid].status != VgTs_Empty);
-   return VG_(threads)[tid].client_stack_highest_word;
+   return VG_(threads)[tid].client_stack_highest_byte;
 }
 
 SizeT VG_(thread_get_stack_size)(ThreadId tid)
@@ -442,7 +505,7 @@ UInt VG_(machine_x86_have_mxcsr) = 0;
 UInt VG_(machine_ppc32_has_FP)  = 0;
 UInt VG_(machine_ppc32_has_VMX) = 0;
 #endif
-#if defined(VGA_ppc64)
+#if defined(VGA_ppc64be) || defined(VGA_ppc64le)
 ULong VG_(machine_ppc64_has_VMX) = 0;
 #endif
 #if defined(VGA_arm)
@@ -452,7 +515,7 @@ Int VG_(machine_arm_archlevel) = 4;
 
 /* For hwcaps detection on ppc32/64, s390x, and arm we'll need to do SIGILL
    testing, so we need a VG_MINIMAL_JMP_BUF. */
-#if defined(VGA_ppc32) || defined(VGA_ppc64) \
+#if defined(VGA_ppc32) || defined(VGA_ppc64be) || defined(VGA_ppc64le) \
     || defined(VGA_arm) || defined(VGA_s390x) || defined(VGA_mips32)
 #include "pub_core_libcsetjmp.h"
 static VG_MINIMAL_JMP_BUF(env_unsup_insn);
@@ -470,7 +533,7 @@ static void handler_unsup_insn ( Int x ) {
  * Not very defensive: assumes that as long as the dcbz/dcbzl
  * instructions don't raise a SIGILL, that they will zero an aligned,
  * contiguous block of memory of a sensible size. */
-#if defined(VGA_ppc32) || defined(VGA_ppc64)
+#if defined(VGA_ppc32) || defined(VGA_ppc64be) || defined(VGA_ppc64le)
 static void find_ppc_dcbz_sz(VexArchInfo *arch_info)
 {
    Int dcbz_szB = 0;
@@ -523,7 +586,7 @@ static void find_ppc_dcbz_sz(VexArchInfo *arch_info)
                  dcbz_szB, dcbzl_szB);
 #  undef MAX_DCBZL_SZB
 }
-#endif /* defined(VGA_ppc32) || defined(VGA_ppc64) */
+#endif /* defined(VGA_ppc32) || defined(VGA_ppc64be) || defined(VGA_ppc64le) */
 
 #ifdef VGA_s390x
 
@@ -537,7 +600,7 @@ static void find_ppc_dcbz_sz(VexArchInfo *arch_info)
 static UInt VG_(get_machine_model)(void)
 {
    static struct model_map {
-      HChar name[5];
+      const HChar name[5];
       UInt  id;
    } model_map[] = {
       { "2064", VEX_S390X_MODEL_Z900 },
@@ -552,6 +615,7 @@ static UInt VG_(get_machine_model)(void)
       { "2818", VEX_S390X_MODEL_Z114 },
       { "2827", VEX_S390X_MODEL_ZEC12 },
       { "2828", VEX_S390X_MODEL_ZBC12 },
+      { "2964", VEX_S390X_MODEL_Z13 },
    };
 
    Int    model, n, fh;
@@ -713,7 +777,7 @@ Bool VG_(machine_get_hwcaps)( void )
    LibVEX_default_VexArchInfo(&vai);
 
 #if defined(VGA_x86)
-   { Bool have_sse1, have_sse2, have_cx8, have_lzcnt, have_mmxext;
+   { Bool have_sse1, have_sse2, have_sse3, have_cx8, have_lzcnt, have_mmxext;
      UInt eax, ebx, ecx, edx, max_extended;
      HChar vstr[13];
      vstr[0] = 0;
@@ -742,6 +806,7 @@ Bool VG_(machine_get_hwcaps)( void )
 
      have_sse1 = (edx & (1<<25)) != 0; /* True => have sse insns */
      have_sse2 = (edx & (1<<26)) != 0; /* True => have sse2 insns */
+     have_sse3 = (ecx & (1<<0)) != 0;  /* True => have sse3 insns */
 
      /* cmpxchg8b is a minimum requirement now; if we don't have it we
         must simply give up.  But all CPUs since Pentium-I have it, so
@@ -750,16 +815,22 @@ Bool VG_(machine_get_hwcaps)( void )
      if (!have_cx8)
         return False;
 
-     /* Figure out if this is an AMD that can do mmxext and/or LZCNT. */
+     /* Figure out if this is an AMD that can do MMXEXT. */
      have_mmxext = False;
-     have_lzcnt = False;
      if (0 == VG_(strcmp)(vstr, "AuthenticAMD")
          && max_extended >= 0x80000001) {
         VG_(cpuid)(0x80000001, 0, &eax, &ebx, &ecx, &edx);
-        have_lzcnt = (ecx & (1<<5)) != 0; /* True => have LZCNT */
-
         /* Some older AMD processors support a sse1 subset (Integer SSE). */
         have_mmxext = !have_sse1 && ((edx & (1<<22)) != 0);
+     }
+
+     /* Figure out if this is an AMD or Intel that can do LZCNT. */
+     have_lzcnt = False;
+     if ((0 == VG_(strcmp)(vstr, "AuthenticAMD")
+          || 0 == VG_(strcmp)(vstr, "GenuineIntel"))
+         && max_extended >= 0x80000001) {
+        VG_(cpuid)(0x80000001, 0, &eax, &ebx, &ecx, &edx);
+        have_lzcnt = (ecx & (1<<5)) != 0; /* True => have LZCNT */
      }
 
      /* Intel processors don't define the mmxext extension, but since it
@@ -768,7 +839,17 @@ Bool VG_(machine_get_hwcaps)( void )
         have_mmxext = True;
 
      va = VexArchX86;
-     if (have_sse2 && have_sse1 && have_mmxext) {
+     vai.endness = VexEndnessLE;
+
+     if (have_sse3 && have_sse2 && have_sse1 && have_mmxext) {
+        vai.hwcaps  = VEX_HWCAPS_X86_MMXEXT;
+        vai.hwcaps |= VEX_HWCAPS_X86_SSE1;
+        vai.hwcaps |= VEX_HWCAPS_X86_SSE2;
+        vai.hwcaps |= VEX_HWCAPS_X86_SSE3;
+        if (have_lzcnt)
+           vai.hwcaps |= VEX_HWCAPS_X86_LZCNT;
+        VG_(machine_x86_have_mxcsr) = 1;
+     } else if (have_sse2 && have_sse1 && have_mmxext) {
         vai.hwcaps  = VEX_HWCAPS_X86_MMXEXT;
         vai.hwcaps |= VEX_HWCAPS_X86_SSE1;
         vai.hwcaps |= VEX_HWCAPS_X86_SSE2;
@@ -852,7 +933,6 @@ Bool VG_(machine_get_hwcaps)( void )
         }
      }
 
-
      /* cmpxchg8b is a minimum requirement now; if we don't have it we
         must simply give up.  But all CPUs since Pentium-I have it, so
         that doesn't seem like much of a restriction. */
@@ -886,14 +966,15 @@ Bool VG_(machine_get_hwcaps)( void )
         have_avx2 = (ebx & (1<<5)) != 0; /* True => have AVX2 */
      }
 
-     va         = VexArchAMD64;
-     vai.hwcaps = (have_sse3   ? VEX_HWCAPS_AMD64_SSE3   : 0)
-                | (have_cx16   ? VEX_HWCAPS_AMD64_CX16   : 0)
-                | (have_lzcnt  ? VEX_HWCAPS_AMD64_LZCNT  : 0)
-                | (have_avx    ? VEX_HWCAPS_AMD64_AVX    : 0)
-                | (have_bmi    ? VEX_HWCAPS_AMD64_BMI    : 0)
-                | (have_avx2   ? VEX_HWCAPS_AMD64_AVX2   : 0)
-                | (have_rdtscp ? VEX_HWCAPS_AMD64_RDTSCP : 0);
+     va          = VexArchAMD64;
+     vai.endness = VexEndnessLE;
+     vai.hwcaps  = (have_sse3   ? VEX_HWCAPS_AMD64_SSE3   : 0)
+                 | (have_cx16   ? VEX_HWCAPS_AMD64_CX16   : 0)
+                 | (have_lzcnt  ? VEX_HWCAPS_AMD64_LZCNT  : 0)
+                 | (have_avx    ? VEX_HWCAPS_AMD64_AVX    : 0)
+                 | (have_bmi    ? VEX_HWCAPS_AMD64_BMI    : 0)
+                 | (have_avx2   ? VEX_HWCAPS_AMD64_AVX2   : 0)
+                 | (have_rdtscp ? VEX_HWCAPS_AMD64_RDTSCP : 0);
 
      VG_(machine_get_cache_info)(&vai);
 
@@ -1042,6 +1123,7 @@ Bool VG_(machine_get_hwcaps)( void )
      VG_(machine_ppc32_has_VMX) = have_V ? 1 : 0;
 
      va = VexArchPPC32;
+     vai.endness = VexEndnessBE;
 
      vai.hwcaps = 0;
      if (have_F)  vai.hwcaps |= VEX_HWCAPS_PPC32_F;
@@ -1059,7 +1141,7 @@ Bool VG_(machine_get_hwcaps)( void )
      return True;
    }
 
-#elif defined(VGA_ppc64)
+#elif defined(VGA_ppc64be)|| defined(VGA_ppc64le)
    {
      /* Same instruction set detection algorithm as for ppc32. */
      vki_sigset_t          saved_set, tmp_set;
@@ -1173,13 +1255,20 @@ Bool VG_(machine_get_hwcaps)( void )
                     (Int)have_F, (Int)have_V, (Int)have_FX,
                     (Int)have_GX, (Int)have_VX, (Int)have_DFP,
                     (Int)have_isa_2_07);
-     /* on ppc64, if we don't even have FP, just give up. */
+     /* on ppc64be, if we don't even have FP, just give up. */
      if (!have_F)
         return False;
 
      VG_(machine_ppc64_has_VMX) = have_V ? 1 : 0;
 
      va = VexArchPPC64;
+#    if defined(VKI_LITTLE_ENDIAN)
+     vai.endness = VexEndnessLE;
+#    elif defined(VKI_BIG_ENDIAN)
+     vai.endness = VexEndnessBE;
+#    else
+     vai.endness = VexEndness_INVALID;
+#    endif
 
      vai.hwcaps = 0;
      if (have_V)  vai.hwcaps |= VEX_HWCAPS_PPC64_V;
@@ -1248,7 +1337,7 @@ Bool VG_(machine_get_hwcaps)( void )
                              ".short 0x0057" : : : "r0", "r1", "cc", "memory");
      }
 
-     /* Check availability og STFLE. If available store facility bits
+     /* Check availability of STFLE. If available store facility bits
         in hoststfle. */
      ULong hoststfle[S390_NUM_FACILITY_DW];
 
@@ -1272,6 +1361,7 @@ Bool VG_(machine_get_hwcaps)( void )
      r = VG_(sigprocmask)(VKI_SIG_SETMASK, &saved_set, NULL);
      vg_assert(r == 0);
      va = VexArchS390X;
+     vai.endness = VexEndnessBE;
 
      vai.hwcaps = model;
      if (have_STFLE) vai.hwcaps |= VEX_HWCAPS_S390X_STFLE;
@@ -1433,6 +1523,7 @@ Bool VG_(machine_get_hwcaps)( void )
      VG_(machine_arm_archlevel) = archlevel;
 
      va = VexArchARM;
+     vai.endness = VexEndnessLE;
 
      vai.hwcaps = VEX_ARM_ARCHLEVEL(archlevel);
      if (have_VFP3) vai.hwcaps |= VEX_HWCAPS_ARM_VFP3;
@@ -1448,11 +1539,25 @@ Bool VG_(machine_get_hwcaps)( void )
 #elif defined(VGA_arm64)
    {
      va = VexArchARM64;
+     vai.endness = VexEndnessLE;
 
      /* So far there are no variants. */
      vai.hwcaps = 0;
 
      VG_(machine_get_cache_info)(&vai);
+
+     /* 0 denotes 'not set'.  The range of legitimate values here,
+        after being set that is, is 2 though 17 inclusive. */
+     vg_assert(vai.arm64_dMinLine_lg2_szB == 0);
+     vg_assert(vai.arm64_iMinLine_lg2_szB == 0);
+     ULong ctr_el0;
+     __asm__ __volatile__("mrs %0, ctr_el0" : "=r"(ctr_el0));
+     vai.arm64_dMinLine_lg2_szB = ((ctr_el0 >> 16) & 0xF) + 2;
+     vai.arm64_iMinLine_lg2_szB = ((ctr_el0 >>  0) & 0xF) + 2;
+     VG_(debugLog)(1, "machine", "ARM64: ctr_el0.dMinLine_szB = %d, "
+                      "ctr_el0.iMinLine_szB = %d\n",
+                   1 << vai.arm64_dMinLine_lg2_szB,
+                   1 << vai.arm64_iMinLine_lg2_szB);
 
      return True;
    }
@@ -1467,6 +1572,14 @@ Bool VG_(machine_get_hwcaps)( void )
          return False;
 
      vai.hwcaps = model;
+
+#    if defined(VKI_LITTLE_ENDIAN)
+     vai.endness = VexEndnessLE;
+#    elif defined(VKI_BIG_ENDIAN)
+     vai.endness = VexEndnessBE;
+#    else
+     vai.endness = VexEndness_INVALID;
+#    endif
 
      /* Same instruction set detection algorithm as for ppc32/arm... */
      vki_sigset_t          saved_set, tmp_set;
@@ -1547,10 +1660,29 @@ Bool VG_(machine_get_hwcaps)( void )
    {
      va = VexArchMIPS64;
      UInt model = VG_(get_machine_model)();
-     if (model== -1)
+     if (model == -1)
          return False;
 
      vai.hwcaps = model;
+
+#    if defined(VKI_LITTLE_ENDIAN)
+     vai.endness = VexEndnessLE;
+#    elif defined(VKI_BIG_ENDIAN)
+     vai.endness = VexEndnessBE;
+#    else
+     vai.endness = VexEndness_INVALID;
+#    endif
+
+     VG_(machine_get_cache_info)(&vai);
+
+     return True;
+   }
+
+#elif defined(VGA_tilegx)
+   {
+     va = VexArchTILEGX;
+     vai.hwcaps = VEX_HWCAPS_TILEGX_BASE;
+     vai.endness = VexEndnessLE;
 
      VG_(machine_get_cache_info)(&vai);
 
@@ -1581,7 +1713,7 @@ void VG_(machine_ppc32_set_clszB)( Int szB )
 
 
 /* Notify host cpu instruction cache line size. */
-#if defined(VGA_ppc64)
+#if defined(VGA_ppc64be)|| defined(VGA_ppc64le)
 void VG_(machine_ppc64_set_clszB)( Int szB )
 {
    vg_assert(hwcaps_done);
@@ -1663,7 +1795,7 @@ Int VG_(machine_get_size_of_largest_guest_register) ( void )
    if (vai.hwcaps & VEX_HWCAPS_PPC32_DFP) return 16;
    return 8;
 
-#  elif defined(VGA_ppc64)
+#  elif defined(VGA_ppc64be) || defined(VGA_ppc64le)
    /* 8 if boring; 16 if signs of Altivec or other exotic stuff */
    if (vai.hwcaps & VEX_HWCAPS_PPC64_V) return 16;
    if (vai.hwcaps & VEX_HWCAPS_PPC64_VX) return 16;
@@ -1690,6 +1822,9 @@ Int VG_(machine_get_size_of_largest_guest_register) ( void )
 #  elif defined(VGA_mips64)
    return 8;
 
+#  elif defined(VGA_tilegx)
+   return 8;
+
 #  else
 #    error "Unknown arch"
 #  endif
@@ -1701,12 +1836,13 @@ Int VG_(machine_get_size_of_largest_guest_register) ( void )
 void* VG_(fnptr_to_fnentry)( void* f )
 {
 #  if defined(VGP_x86_linux) || defined(VGP_amd64_linux)  \
-      || defined(VGP_arm_linux)                           \
-      || defined(VGP_ppc32_linux) || defined(VGO_darwin)  \
+      || defined(VGP_arm_linux) || defined(VGO_darwin)          \
+      || defined(VGP_ppc32_linux) || defined(VGP_ppc64le_linux) \
       || defined(VGP_s390x_linux) || defined(VGP_mips32_linux) \
-      || defined(VGP_mips64_linux) || defined(VGP_arm64_linux)
+      || defined(VGP_mips64_linux) || defined(VGP_arm64_linux) \
+      || defined(VGP_tilegx_linux)
    return f;
-#  elif defined(VGP_ppc64_linux)
+#  elif defined(VGP_ppc64be_linux)
    /* ppc64-linux uses the AIX scheme, in which f is a pointer to a
       3-word function descriptor, of which the first word is the entry
       address. */

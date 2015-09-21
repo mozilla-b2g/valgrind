@@ -1,3 +1,4 @@
+/* -*- mode: C; c-basic-offset: 3; -*- */
 
 /*--------------------------------------------------------------------*/
 /*--- Libc printing.                                 m_libcprint.c ---*/
@@ -37,6 +38,7 @@
 #include "pub_core_libcfile.h"   // VG_(write)(), VG_(write_socket)()
 #include "pub_core_libcprint.h"
 #include "pub_core_libcproc.h"   // VG_(getpid)(), VG_(read_millisecond_timer()
+#include "pub_core_mallocfree.h" // VG_(malloc)
 #include "pub_core_options.h"
 #include "pub_core_clreq.h"      // For RUNNING_ON_VALGRIND
 
@@ -108,7 +110,7 @@ static void add_to__printf_buf ( HChar c, void *p )
    }
    b->buf[b->buf_used++] = c;
    b->buf[b->buf_used]   = 0;
-   tl_assert(b->buf_used < sizeof(b->buf));
+   vg_assert(b->buf_used < sizeof(b->buf));
 }
 
 static UInt vprintf_to_buf ( printf_buf_t* b,
@@ -168,6 +170,25 @@ UInt VG_(printf_xml) ( const HChar *format, ... )
    return ret;
 }
 
+static UInt emit_WRK ( const HChar* format, va_list vargs )
+{
+   if (VG_(clo_xml)) {
+      return VG_(vprintf_xml)(format, vargs);
+   } else if (VG_(log_output_sink).fd == -2) {
+      return VG_(vprintf) (format, vargs);
+   } else {
+      return VG_(vmessage)(Vg_UserMsg, format, vargs);
+   }
+}
+UInt VG_(emit) ( const HChar* format, ... )
+{
+   UInt ret;
+   va_list vargs;
+   va_start(vargs, format);
+   ret = emit_WRK(format, vargs);
+   va_end(vargs);
+   return ret;
+}
 
 /* --------- sprintf --------- */
 
@@ -207,6 +228,17 @@ UInt VG_(sprintf) ( HChar* buf, const HChar *format, ... )
 
 
 /* --------- snprintf --------- */
+
+/* The return value of VG_(snprintf) and VG_(vsnprintf) differs from
+   what is defined in C99. Let S be the size of the buffer as given in
+   the 2nd argument.
+   Return value R:
+     R < S:  The output string was successfully written to the buffer.
+             It is null-terminated and R == strlen( output string )
+     R == S: The supplied buffer was too small to hold the output string.
+             The first S-1 characters of the output string were written
+             to the buffer followed by the terminating null character.
+*/
 
 typedef 
    struct {
@@ -264,56 +296,70 @@ void VG_(vcbprintf)( void(*char_sink)(HChar, void* opaque),
 }
 
 
-/* ---------------------------------------------------------------------
-   percentify()
-   ------------------------------------------------------------------ */
+/* --------- fprintf ---------- */
 
-// Percentify n/m with d decimal places.  Includes the '%' symbol at the end.
-// Right justifies in 'buf'.
-void VG_(percentify)(ULong n, ULong m, UInt d, Int n_buf, HChar buf[]) 
+/* This is like [v]fprintf, except it writes to a file handle using
+   VG_(write). */
+
+#define VGFILE_BUFSIZE  8192
+
+struct _VgFile {
+   HChar buf[VGFILE_BUFSIZE];
+   UInt  num_chars;   // number of characters in buf
+   Int   fd;          // file descriptor to write to
+};
+
+
+static void add_to__vgfile ( HChar c, void *p )
 {
-   Int i, len, space;
-   ULong p1;
-   HChar fmt[32];
+   VgFile *fp = p;
 
-   if (m == 0) {
-      // Have to generate the format string in order to be flexible about
-      // the width of the field.
-      VG_(sprintf)(fmt, "%%-%ds", n_buf);
-      // fmt is now "%<n_buf>s" where <d> is 1,2,3...
-      VG_(sprintf)(buf, fmt, "--%");
-      return;
+   fp->buf[fp->num_chars++] = c;
+
+   if (fp->num_chars == VGFILE_BUFSIZE) {
+      VG_(write)(fp->fd, fp->buf, fp->num_chars);
+      fp->num_chars = 0;
    }
-   
-   p1 = (100*n) / m;
-    
-   if (d == 0) {
-      VG_(sprintf)(buf, "%lld%%", p1);
-   } else {
-      ULong p2;
-      UInt  ex;
-      switch (d) {
-      case 1: ex = 10;    break;
-      case 2: ex = 100;   break;
-      case 3: ex = 1000;  break;
-      default: VG_(tool_panic)("Currently can only handle 3 decimal places");
-      }
-      p2 = ((100*n*ex) / m) % ex;
-      // Have to generate the format string in order to be flexible about
-      // the width of the post-decimal-point part.
-      VG_(sprintf)(fmt, "%%lld.%%0%dlld%%%%", d);
-      // fmt is now "%lld.%0<d>lld%%" where <d> is 1,2,3...
-      VG_(sprintf)(buf, fmt, p1, p2);
-   }
+}
 
-   len = VG_(strlen)(buf);
-   space = n_buf - len;
-   if (space < 0) space = 0;     /* Allow for v. small field_width */
-   i = len;
+VgFile *VG_(fopen)(const HChar *name, Int flags, Int mode)
+{
+   SysRes res = VG_(open)(name, flags, mode);
 
-   /* Right justify in field */
-   for (     ; i >= 0;    i--)  buf[i + space] = buf[i];
-   for (i = 0; i < space; i++)  buf[i] = ' ';
+   if (sr_isError(res))
+      return NULL;
+
+   VgFile *fp = VG_(malloc)("fopen", sizeof(VgFile));
+
+   fp->fd = sr_Res(res);
+   fp->num_chars = 0;
+
+   return fp;
+}
+
+
+UInt VG_(vfprintf) ( VgFile *fp, const HChar *format, va_list vargs )
+{
+   return VG_(debugLog_vprintf)(add_to__vgfile, fp, format, vargs);
+}
+
+UInt VG_(fprintf) ( VgFile *fp, const HChar *format, ... )
+{
+   UInt ret;
+   va_list vargs;
+   va_start(vargs,format);
+   ret = VG_(vfprintf)(fp, format, vargs);
+   va_end(vargs);
+   return ret;
+}
+
+void VG_(fclose)( VgFile *fp )
+{
+   // Flush the buffer.
+   if (fp->num_chars)
+      VG_(write)(fp->fd, fp->buf, fp->num_chars);
+
+   VG_(free)(fp);
 }
 
 
@@ -326,9 +372,11 @@ void VG_(percentify)(ULong n, ULong m, UInt d, Int n_buf, HChar buf[])
    millisecond timer having been set to zero by an initial read in
    m_main during startup. */
 
-void VG_(elapsed_wallclock_time) ( /*OUT*/HChar* buf )
+void VG_(elapsed_wallclock_time) ( /*OUT*/HChar* buf, SizeT bufsize )
 {
    UInt t, ms, s, mins, hours, days;
+
+   vg_assert(bufsize > 20);
 
    t  = VG_(read_millisecond_timer)(); /* milliseconds */
 
@@ -403,7 +451,8 @@ static void add_to__vmessage_buf ( HChar c, void *p )
       // (useful to run regression tests in an outer/inner setup
       // and avoid the diff failing due to these unexpected '>').
       depth = RUNNING_ON_VALGRIND;
-      if (depth > 0 && !VG_(strstr)(VG_(clo_sim_hints), "no-inner-prefix")) {
+      if (depth > 0 
+          && !SimHintiS(SimHint_no_inner_prefix, VG_(clo_sim_hints))) {
          if (depth > 10)
             depth = 10; // ?!?!
          for (i = 0; i < depth; i++) {
@@ -435,9 +484,7 @@ static void add_to__vmessage_buf ( HChar c, void *p )
          b->buf[b->buf_used++] = ch;
 
          if (VG_(clo_time_stamp)) {
-            VG_(memset)(tmp, 0, sizeof(tmp));
-            VG_(elapsed_wallclock_time)(tmp);
-            tmp[sizeof(tmp)-1] = 0;
+            VG_(elapsed_wallclock_time)(tmp, sizeof tmp);
             for (i = 0; tmp[i]; i++)
                b->buf[b->buf_used++] = tmp[i];
          }
@@ -533,8 +580,16 @@ void VG_(fmsg_bad_option) ( const HChar* opt, const HChar* format, ... )
    VG_(message) (Vg_FailMsg, "Bad option: %s\n", opt);
    VG_(vmessage)(Vg_FailMsg, format, vargs );
    VG_(message) (Vg_FailMsg, "Use --help for more information or consult the user manual.\n");
-   VG_(exit)(1);
    va_end(vargs);
+   VG_(exit)(1);
+}
+
+void VG_(fmsg_unknown_option) ( const HChar* opt)
+{
+   revert_to_stderr();
+   VG_(message) (Vg_FailMsg, "Unknown option: %s\n", opt);
+   VG_(message) (Vg_FailMsg, "Use --help for more information or consult the user manual.\n");
+   VG_(exit)(1);
 }
 
 UInt VG_(umsg) ( const HChar* format, ... )
@@ -584,12 +639,46 @@ void VG_(err_config_error) ( const HChar* format, ... )
    VG_(message) (Vg_FailMsg, "Startup or configuration error:\n   ");
    VG_(vmessage)(Vg_FailMsg, format, vargs );
    VG_(message) (Vg_FailMsg, "Unable to start up properly.  Giving up.\n");
-   VG_(exit)(1);
    va_end(vargs);
+   VG_(exit)(1);
 }
 
+/* ---------------------------------------------------------------------
+   VG_(sr_as_string)()
+   ------------------------------------------------------------------ */
+
+#if defined(VGO_linux)
+// FIXME: Does this function need to be adjusted for MIPS's _valEx ?
+const HChar *VG_(sr_as_string) ( SysRes sr )
+{
+   static HChar buf[7+1+2+16+1+1];   // large enough
+
+   if (sr_isError(sr))
+      VG_(sprintf)(buf, "Failure(0x%lx)", sr_Err(sr));
+   else
+      VG_(sprintf)(buf, "Success(0x%lx)", sr_Res(sr));
+   return buf;
+}
+
+#elif defined(VGO_darwin)
+
+const HChar *VG_(sr_as_string) ( SysRes sr )
+{
+   static HChar buf[7+1+2+16+1+2+16+1+1];   // large enough
+
+   if (sr_isError(sr))
+      VG_(sprintf)(buf, "Failure(0x%lx)", sr_Err(sr));
+   else
+      VG_(sprintf)(buf, "Success(0x%lx:0x%lx)", sr_ResHI(sr), sr_Res(sr));
+   return buf;
+}
+
+#else
+
+#error unknown OS
+
+#endif
 
 /*--------------------------------------------------------------------*/
 /*--- end                                                          ---*/
 /*--------------------------------------------------------------------*/
-

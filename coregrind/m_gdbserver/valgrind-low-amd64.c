@@ -26,7 +26,6 @@
 #include "regdef.h"
 #include "regcache.h"
 
-#include "pub_core_aspacemgr.h"
 #include "pub_core_machine.h"
 #include "pub_core_threadstate.h"
 #include "pub_core_transtab.h"
@@ -198,7 +197,7 @@ void transfer_register (ThreadId tid, int abs_regno, void * buf,
    case 20: *mod = False; break; //GDBTD VG_(transfer) (&amd64->guest_DS, buf, dir, size, mod);
    case 21: *mod = False; break; //GDBTD VG_(transfer) (&amd64->guest_ES, buf, dir, size, mod);
    case 22: *mod = False; break; //GDBTD VG_(transfer) (&amd64->guest_FS, buf, dir, size, mod);
-   case 23: VG_(transfer) (&amd64->guest_GS_0x60, buf, dir, size, mod); break;
+   case 23: VG_(transfer) (&amd64->guest_GS_CONST, buf, dir, size, mod); break;
    case 24:
    case 25:
    case 26:
@@ -315,6 +314,7 @@ Bool have_avx(void)
    VG_(machine_get_VexArchInfo) (&va, &vai);
    return (vai.hwcaps & VEX_HWCAPS_AMD64_AVX ? True : False);
 }
+
 static
 const char* target_xml (Bool shadow_mode)
 {
@@ -345,6 +345,12 @@ const char* target_xml (Bool shadow_mode)
    }  
 }
 
+static CORE_ADDR** target_get_dtv (ThreadState *tst)
+{
+   VexGuestAMD64State* amd64 = (VexGuestAMD64State*)&tst->arch.vex;
+   return (CORE_ADDR**)((CORE_ADDR)amd64->guest_FS_CONST + 0x8);
+}
+
 static struct valgrind_target_ops low_target = {
    -1, // Must be computed at init time.
    regs,
@@ -353,7 +359,8 @@ static struct valgrind_target_ops low_target = {
    get_pc,
    set_pc,
    "amd64",
-   target_xml
+   target_xml,
+   target_get_dtv
 };
 
 void amd64_init_architecture (struct valgrind_target_ops *target)

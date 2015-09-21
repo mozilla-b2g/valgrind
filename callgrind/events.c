@@ -162,14 +162,6 @@ EventSet* CLG_(get_event_set2)(Int id1, Int id2)
     return eventset_from_mask((1u << id1) | (1u << id2));
 }
 
-EventSet* CLG_(get_event_set3)(Int id1, Int id2, Int id3)
-{
-    CLG_ASSERT(id1>=0 && id1<MAX_EVENTGROUP_COUNT);
-    CLG_ASSERT(id2>=0 && id2<MAX_EVENTGROUP_COUNT);
-    CLG_ASSERT(id3>=0 && id3<MAX_EVENTGROUP_COUNT);
-    return eventset_from_mask((1u << id1) | (1u << id2) | (1u << id3));
-}
-
 EventSet* CLG_(add_event_group)(EventSet* es, Int id)
 {
     CLG_ASSERT(id>=0 && id<MAX_EVENTGROUP_COUNT);
@@ -190,30 +182,6 @@ EventSet* CLG_(add_event_set)(EventSet* es1, EventSet* es2)
     if (!es1) es1 = eventset_from_mask(0);
     if (!es2) es2 = eventset_from_mask(0);
     return eventset_from_mask(es1->mask | es2->mask);
-}
-
-Int CLG_(sprint_eventset)(HChar* buf, EventSet* es)
-{
-    Int i, j, pos;
-    UInt mask;
-    EventGroup* eg;
-
-
-    CLG_ASSERT(es->size >0);
-    pos = 0;
-    for(i=0, mask=1; i<MAX_EVENTGROUP_COUNT; i++, mask=mask<<1) {
-	if ((es->mask & mask)==0) continue;
-	if (eventGroup[i] ==0) continue;
-
-	eg = eventGroup[i];
-	for(j=0; j<eg->size; j++) {
-	    if (pos>0) buf[pos++] = ' ';
-	    pos += VG_(sprintf)(buf + pos, "%s", eg->name[j]);
-	}
-    }
-    buf[pos] = 0;
-
-    return pos;
 }
 
 
@@ -265,19 +233,6 @@ Bool CLG_(is_zero_cost)(EventSet* es, ULong* cost)
 
     for(i=0; i<es->size; i++)
 	if (cost[i] != 0) return False;
-
-    return True;
-}
-
-Bool CLG_(is_equal_cost)(EventSet* es, ULong* c1, ULong* c2)
-{
-    Int i;
-
-    if (!c1) return CLG_(is_zero_cost)(es, c2);
-    if (!c2) return CLG_(is_zero_cost)(es, c1);
-
-    for(i=0; i<es->size; i++)
-	if (c1[i] != c2[i]) return False;
 
     return True;
 }
@@ -445,33 +400,6 @@ Bool CLG_(add_diff_cost_lz)(EventSet* es, ULong** pdst, ULong* old, ULong* new_c
 }
 
 
-/* Returns number of characters written */
-Int CLG_(sprint_cost)(HChar* buf, EventSet* es, ULong* c)
-{
-    Int i, pos, skipped = 0;
-
-    if (!c || es->size==0) return 0;
-
-    /* At least one entry */
-    pos = VG_(sprintf)(buf, "%llu", c[0]);
-    for(i=1; i<es->size; i++) {
-	if (c[i] == 0) {
-	    skipped++;
-	    continue;
-	}
-	while(skipped>0) {
-	    buf[pos++] = ' ';
-	    buf[pos++] = '0';
-	    skipped--;
-	}
-	buf[pos++] = ' ';
-	pos += VG_(sprintf)(buf+pos, "%llu", c[i]);
-    }
-
-    return pos;
-}
-
-
 /* Allocate space for an event mapping */
 EventMapping* CLG_(get_eventmapping)(EventSet* es)
 {
@@ -517,34 +445,47 @@ void CLG_(append_event)(EventMapping* em, const HChar* n)
 }
 
 
-/* Returns number of characters written */
-Int CLG_(sprint_eventmapping)(HChar* buf, EventMapping* em)
+/* Returns pointer to dynamically string. The string will be overwritten
+   with each invocation. */
+HChar *CLG_(eventmapping_as_string)(const EventMapping* em)
 {
-    Int i, pos = 0;
+    Int i;
     EventGroup* eg;
 
     CLG_ASSERT(em != 0);
 
+    XArray *xa = VG_(newXA)(VG_(malloc), "cl.events.emas", VG_(free),
+                            sizeof(HChar));
+
     for(i=0; i< em->size; i++) {
-	if (pos>0) buf[pos++] = ' ';
+	if (i > 0) {
+           VG_(xaprintf)(xa, "%c", ' ');
+        }
 	eg = eventGroup[em->entry[i].group];
 	CLG_ASSERT(eg != 0);
-	pos += VG_(sprintf)(buf + pos, "%s", eg->name[em->entry[i].index]);
+        VG_(xaprintf)(xa, "%s", eg->name[em->entry[i].index]);
     }
-    buf[pos] = 0;
+    VG_(xaprintf)(xa, "%c", '\0');   // zero terminate the string
 
-    return pos;
+    HChar *buf = VG_(strdup)("cl.events.emas", VG_(indexXA)(xa, 0));
+    VG_(deleteXA)(xa);
+
+    return buf;
 }
 
-/* Returns number of characters written */
-Int CLG_(sprint_mappingcost)(HChar* buf, EventMapping* em, ULong* c)
+/* Returns pointer to dynamically allocated string. Caller needs to
+   VG_(free) it. */
+HChar *CLG_(mappingcost_as_string)(const EventMapping* em, const ULong* c)
 {
-    Int i, pos, skipped = 0;
+    Int i, skipped = 0;
 
-    if (!c || em->size==0) return 0;
+    if (!c || em->size==0) return VG_(strdup)("cl.events.mcas", "");
+
+    XArray *xa = VG_(newXA)(VG_(malloc), "cl.events.mcas", VG_(free),
+                            sizeof(HChar));
 
     /* At least one entry */
-    pos = VG_(sprintf)(buf, "%llu", c[em->entry[0].offset]);
+    VG_(xaprintf)(xa, "%llu", c[em->entry[0].offset]);
 
     for(i=1; i<em->size; i++) {
 	if (c[em->entry[i].offset] == 0) {
@@ -552,13 +493,15 @@ Int CLG_(sprint_mappingcost)(HChar* buf, EventMapping* em, ULong* c)
 	    continue;
 	}
 	while(skipped>0) {
-	    buf[pos++] = ' ';
-	    buf[pos++] = '0';
+            VG_(xaprintf)(xa, " 0");
 	    skipped--;
 	}
-	buf[pos++] = ' ';
-	pos += VG_(sprintf)(buf+pos, "%llu", c[em->entry[i].offset]);
+	VG_(xaprintf)(xa, " %llu", c[em->entry[i].offset]);
     }
+    VG_(xaprintf)(xa, "%c", '\0');   // zero terminate the string
 
-    return pos;
+    HChar *buf = VG_(strdup)("cl.events.mas", VG_(indexXA)(xa, 0));
+    VG_(deleteXA)(xa);
+
+    return buf;
 }

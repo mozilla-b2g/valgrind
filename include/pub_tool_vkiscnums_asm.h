@@ -42,7 +42,7 @@
 #elif defined(VGP_ppc32_linux)
 #  include "vki/vki-scnums-ppc32-linux.h"
 
-#elif defined(VGP_ppc64_linux)
+#elif defined(VGP_ppc64be_linux) || defined(VGP_ppc64le_linux)
 #  include "vki/vki-scnums-ppc64-linux.h"
 
 #elif defined(VGP_s390x_linux)
@@ -62,6 +62,9 @@
 
 #elif defined(VGP_x86_darwin) || defined(VGP_amd64_darwin)
 #  include "vki/vki-scnums-darwin.h"
+
+#elif defined(VGP_tilegx_linux)
+#  include "vki/vki-scnums-tilegx-linux.h"
 
 #else
 #  error Unknown platform

@@ -307,6 +307,13 @@
 #define __NR_process_vm_writev 271
 #define __NR_kcmp 272
 #define __NR_finit_module 273
+#define __NR_sched_setattr 274
+#define __NR_sched_getattr 275
+#define __NR_renameat2 276
+#define __NR_seccomp 277
+#define __NR_getrandom 278
+#define __NR_memfd_create 279
+#define __NR_bpf 280
 
 #undef __NR_syscalls
 #define __NR_syscalls 274
@@ -391,7 +398,7 @@
 //__SYSCALL(__NR_fstatfs, sys_fstatfs)
 //#define __NR_statfs 1056
 //__SYSCALL(__NR_statfs, sys_statfs)
-#define __NR_lseek 1057
+//#define __NR_lseek 1057
 #define __NR_mmap 1058
 //
 //#undef __NR_syscalls
@@ -475,7 +482,7 @@
 //#define __NR_fstatfs __NR3264_fstatfs
 //#define __NR_truncate __NR3264_truncate
 //#define __NR_ftruncate __NR3264_ftruncate
-//#define __NR_lseek __NR3264_lseek
+#define __NR_lseek __NR3264_lseek
 //#define __NR_sendfile __NR3264_sendfile
 //#define __NR_newfstatat __NR3264_fstatat
 #define __NR_fstat __NR3264_fstat

@@ -50,7 +50,8 @@
 
 typedef  struct _SparseWA  SparseWA; /* opaque */
 
-// Create a new one, using the specified allocator/deallocator
+// Create a new one, using the specified allocator/deallocator.
+// Never returns NULL.
 SparseWA* VG_(newSWA) ( void*(*alloc_nofail)(const HChar* cc, SizeT), 
                         const HChar* cc,
                         void(*dealloc)(void*) );
@@ -62,21 +63,17 @@ void VG_(deleteSWA) ( SparseWA* swa );
 // overwritten.  Returned Bool is True iff a previous binding existed.
 Bool VG_(addToSWA) ( SparseWA* swa, UWord key, UWord val );
 
-// Delete key from swa, returning associated key and val if found.
-// Note: returning associated key is stupid (it can only be the
-// key you just specified).  This behaviour is retained to make it
-// easier to migrate from WordFM.  Returned Bool is True iff
-// the key was actually bound in the mapping.
+// Delete key from swa, returning val if found.
+// Returned Bool is True iff the key was actually bound in the mapping.
 Bool VG_(delFromSWA) ( SparseWA* swa,
-                       /*OUT*/UWord* oldK, /*OUT*/UWord* oldV,
+                       /*OUT*/UWord* oldV,
                        UWord key );
 
 // Indexes swa at 'key' (or, if you like, looks up 'key' in the
-// mapping), and returns the associated value, if any, in *valP.  For
-// compatibility with WordFM, 'key' is also returned in *keyP.  Returned
-// Bool is True iff a binding for 'key' actually existed.
-Bool VG_(lookupSWA) ( SparseWA* swa,
-                      /*OUT*/UWord* keyP, /*OUT*/UWord* valP,
+// mapping), and returns the associated value, if any, in *valP.
+// Returned Bool is True iff a binding for 'key' actually existed.
+Bool VG_(lookupSWA) ( const SparseWA* swa,
+                      /*OUT*/UWord* valP,
                       UWord key );
 
 // Set up 'swa' for iteration.
@@ -92,7 +89,7 @@ Bool VG_(nextIterSWA)( SparseWA* swa,
 // How many elements are there in 'swa'?  NOTE: dangerous in the
 // sense that this is not an O(1) operation but rather O(N),
 // since it involves walking the whole tree.
-UWord VG_(sizeSWA) ( SparseWA* swa );
+UWord VG_(sizeSWA) ( const SparseWA* swa );
 
 #endif   // __PUB_TOOL_SPARSEWA_H
 

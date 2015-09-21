@@ -61,7 +61,7 @@ static exec_stack current_states;
 /* current running thread */
 ThreadId CLG_(current_tid);
 
-static thread_info* thread[VG_N_THREADS];
+static thread_info** thread;
 
 thread_info** CLG_(get_threads)()
 {
@@ -75,7 +75,10 @@ thread_info* CLG_(get_current_thread)()
 
 void CLG_(init_threads)()
 {
-    Int i;
+    UInt i;
+
+    thread = CLG_MALLOC("cl.threads.it.1", VG_N_THREADS * sizeof thread[0]);
+
     for(i=0;i<VG_N_THREADS;i++)
 	thread[i] = 0;
     CLG_(current_tid) = VG_INVALID_THREADID;
@@ -179,7 +182,7 @@ void CLG_(run_thread)(ThreadId tid)
 {
     /* check for dumps needed */
     static ULong bbs_done = 0;
-    static HChar buf[512];
+    HChar buf[50];   // large enough
 
     if (CLG_(clo).dump_every_bb >0) {
        if (CLG_(stat).bb_executions - bbs_done > CLG_(clo).dump_every_bb) {

@@ -32,7 +32,6 @@
 #include "pub_core_basics.h"
 #include "pub_core_vki.h"
 #include "pub_core_vkiscnums.h"
-#include "pub_core_libcsetjmp.h"    // to keep _threadstate.h happy
 #include "pub_core_threadstate.h"
 #include "pub_core_aspacemgr.h"
 #include "pub_core_debuglog.h"
@@ -48,7 +47,6 @@
 #include "pub_core_syscall.h"
 #include "pub_core_syswrap.h"
 #include "pub_core_tooliface.h"
-#include "pub_core_stacks.h"        // VG_(register_stack)
 #include "pub_core_transtab.h"      // VG_(discard_translations)
 #include "priv_types_n_macros.h"
 #include "priv_syswrap-generic.h"   /* for decls of generic wrappers */
@@ -248,7 +246,6 @@ static SysRes do_clone (ThreadId ptid,
    ThreadState * ctst = VG_ (get_ThreadState) (ctid);
    UInt ret = 0;
    UWord * stack;
-   NSegment const *seg;
    SysRes res;
    vki_sigset_t blockall, savedmask;
 
@@ -283,22 +280,8 @@ static SysRes do_clone (ThreadId ptid,
       See #226116. */ 
 
    ctst->os_state.threadgroup = ptst->os_state.threadgroup;
-   seg = VG_ (am_find_nsegment) ((Addr) sp);
 
-   if (seg && seg->kind != SkResvn) {
-      ctst->client_stack_highest_word = (Addr) VG_PGROUNDUP (sp);
-      ctst->client_stack_szB = ctst->client_stack_highest_word - seg->start;
-      VG_ (register_stack) (seg->start, ctst->client_stack_highest_word);
-      if (debug)
-         VG_ (printf) ("tid %d: guessed client stack range %#lx-%#lx\n",
-
-      ctid, seg->start, VG_PGROUNDUP (sp));
-   } else {
-      VG_ (message) (Vg_UserMsg,
-                     "!? New thread %d starts with sp+%#lx) unmapped\n",
-                     ctid, sp);
-      ctst->client_stack_szB = 0;
-   }
+   ML_(guess_and_register_stack) (sp, ctst);
 
    VG_TRACK (pre_thread_ll_create, ptid, ctid);
    if (flags & VKI_CLONE_SETTLS) {
@@ -380,7 +363,7 @@ static void notify_core_of_mmap(Addr a, SizeT len, UInt prot,
    d = VG_(am_notify_client_mmap)( a, len, prot, flags, fd, offset );
 
    if (d)
-      VG_(discard_translations)( (Addr64)a, (ULong)len,
+      VG_(discard_translations)( a, (ULong)len,
                                  "notify_core_of_mmap" );
 }
 
@@ -767,7 +750,7 @@ PRE (sys_cacheflush)
   PRINT ("cacheflush (%lx, %lx, %lx)", ARG1, ARG2, ARG3);
   PRE_REG_READ3(long, "cacheflush", unsigned long, addr,
                 int, nbytes, int, cache);
-  VG_ (discard_translations) ((Addr64) ARG1, ((ULong) ARG2),
+  VG_ (discard_translations) ((Addr)ARG1, (ULong) ARG2,
                               "PRE(sys_cacheflush)");
   SET_STATUS_Success (0);
 }
@@ -1129,9 +1112,13 @@ static SyscallTableEntry syscall_main_table[] = {
    LINXY (__NR_prlimit64,              sys_prlimit64),               // 338
    //..
    LINXY (__NR_clock_adjtime,          sys_clock_adjtime),           // 341
+   LINX_ (__NR_syncfs,                 sys_syncfs),                  // 342
    //..
    LINXY (__NR_process_vm_readv,       sys_process_vm_readv),        // 345
-   LINX_ (__NR_process_vm_writev,      sys_process_vm_writev)        // 346
+   LINX_ (__NR_process_vm_writev,      sys_process_vm_writev),       // 346
+   //..
+   LINXY(__NR_getrandom,               sys_getrandom),               // 353
+   LINXY(__NR_memfd_create,            sys_memfd_create)             // 354
 };
 
 SyscallTableEntry* ML_(get_linux_syscall_entry) (UInt sysno)

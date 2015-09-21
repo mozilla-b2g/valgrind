@@ -71,6 +71,31 @@
     }) \
    )
 
+// UInt enum set arg, eg. --foo=fubar,bar,baz or --foo=none
+// or --foo=all  (if qq_all is True)
+#define VG_USETGEN_CLO(qq_arg, qq_option, qq_vals, qq_var, qq_all) \
+   (VG_STREQN(VG_(strlen)(qq_option)+1, qq_arg, qq_option"=") && \
+    ({ \
+      const HChar* val = &(qq_arg)[ VG_(strlen)(qq_option)+1 ]; \
+      if (!VG_(parse_enum_set)(qq_vals, \
+                               qq_all,/*allow_all*/ \
+                               val, \
+                               &(qq_var))) \
+            VG_(fmsg_bad_option)(qq_arg, "%s is an invalid %s set\n", \
+                                 val, qq_option+2); \
+      True; \
+     }) \
+    )
+
+// UInt enum set arg, eg. --foo=fubar,bar,baz or --foo=none or --foo=all
+#define VG_USET_CLO(qq_arg, qq_option, qq_vals, qq_var) \
+   VG_USETGEN_CLO((qq_arg), qq_option, (qq_vals), (qq_var), True)
+
+/* Same as VG_USET_CLO but not allowing --foo=all.
+   To be used when some or all of the enum set are mutually eXclusive. */
+#define VG_USETX_CLO(qq_arg, qq_option, qq_vals, qq_var) \
+   VG_USETGEN_CLO((qq_arg), qq_option, (qq_vals), (qq_var), False)
+
 // Unbounded integer arg, eg. --foo=10
 #define VG_INT_CLO(qq_arg, qq_option, qq_var) \
    (VG_STREQN(VG_(strlen)(qq_option)+1, qq_arg, qq_option"=") && \
@@ -80,7 +105,8 @@
       Long n = VG_(strtoll10)( val, &s ); \
       (qq_var) = n; \
       /* Check for non-numeralness, or overflow. */ \
-      if ('\0' != s[0] || (qq_var) != n) VG_(fmsg_bad_option)(qq_arg, ""); \
+      if ('\0' != s[0] || (qq_var) != n) VG_(fmsg_bad_option)(qq_arg, \
+                                  "Invalid integer value '%s'\n", val); \
       True; \
      }) \
     )
@@ -98,7 +124,8 @@
       /* for all the other macros in this file. */ \
       /* Check for non-numeralness, or overflow. */ \
       /* Nb: it will overflow if qq_var is unsigned and qq_val is negative! */ \
-      if ('\0' != s[0] || (qq_var) != n) VG_(fmsg_bad_option)(qq_arg, ""); \
+      if ('\0' != s[0] || (qq_var) != n) VG_(fmsg_bad_option)(qq_arg, \
+                                  "Invalid integer value '%s'\n", val); \
       /* Check bounds. */ \
       if ((qq_var) < (qq_lo) || (qq_var) > (qq_hi)) { \
          VG_(fmsg_bad_option)(qq_arg, \
@@ -128,7 +155,8 @@
       double n = VG_(strtod)( val, &s ); \
       (qq_var) = n; \
       /* Check for non-numeralness */ \
-      if ('\0' != s[0]) VG_(fmsg_bad_option)(qq_arg, ""); \
+      if ('\0' != s[0]) VG_(fmsg_bad_option)(qq_arg, \
+                            "Invalid floating point value '%s'\n",val); \
       True; \
      }) \
     )
@@ -142,6 +170,24 @@
       True; \
     }) \
    )
+
+// Arg that can be one of a set of strings, as specified in an NULL
+// terminated array.  Returns the index of the string in |qq_ix|, or
+// aborts if not found.
+#define VG_STRINDEX_CLO(qq_arg, qq_option, qq_strings, qq_ix) \
+   (VG_STREQN(VG_(strlen)(qq_option)+1, qq_arg, qq_option"=") && \
+    ({ \
+      const HChar* val = &(qq_arg)[ VG_(strlen)(qq_option)+1 ]; \
+      for (qq_ix = 0; (qq_strings)[qq_ix]; qq_ix++) { \
+         if (VG_STREQ(val, (qq_strings)[qq_ix])) \
+            break; \
+      } \
+      if ((qq_strings)[qq_ix] == NULL) \
+         VG_(fmsg_bad_option)(qq_arg, \
+                              "Invalid string '%s' in '%s'\n", val, qq_arg); \
+      True; \
+     }) \
+    )
 
 /* Verbosity level: 0 = silent, 1 (default), > 1 = more verbose. */
 extern Int  VG_(clo_verbosity);
@@ -175,8 +221,9 @@ extern const HChar* VG_(clo_xml_user_comment);
 /* Vex iropt control.  Tool-visible so tools can make Vex optimise
    less aggressively if that is needed (callgrind needs this). */
 extern VexControl VG_(clo_vex_control);
+extern VexRegisterUpdates VG_(clo_px_file_backed);
 
-/* Number of parents of a backtrace.  Default: 8.  */
+/* Number of parents of a backtrace.  Default: 12  */
 extern Int   VG_(clo_backtrace_size);
 
 /* Continue stack traces below main()?  Default: NO */

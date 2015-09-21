@@ -73,7 +73,6 @@ static void* sg_malloc ( const HChar* cc, SizeT n ) {
    void* p;
    tl_assert(n > 0);
    p = VG_(malloc)( cc, n );
-   tl_assert(p);
    return p;
 }
 
@@ -869,11 +868,11 @@ static void pp_Invar ( Invar* i )
 /* Compare two Invars for equality. */
 static Bool eq_Invar ( Invar* i1, Invar* i2 )
 {
-   tl_assert(i1->tag != Inv_Unset);
-   tl_assert(i2->tag != Inv_Unset);
    if (i1->tag != i2->tag)
       return False;
    switch (i1->tag) {
+      case Inv_Unset:
+         return True;
       case Inv_Unknown:
          return True;
       case Inv_Stack0:
@@ -1039,11 +1038,11 @@ static ULong stats__qcache_probes  = 0;
    * a shadow stack of StackFrames, which is a double-linked list
    * an stack block interval tree
 */
-static  struct _StackFrame*          shadowStacks[VG_N_THREADS];
+static  struct _StackFrame**         shadowStacks;
 
-static  WordFM* /* StackTreeNode */  siTrees[VG_N_THREADS];
+static  WordFM** /* StackTreeNode */ siTrees;
 
-static  QCache                       qcaches[VG_N_THREADS];
+static  QCache*                      qcaches;
 
 
 /* Additionally, there is one global variable interval tree
@@ -1063,9 +1062,16 @@ static void invalidate_all_QCaches ( void )
 static void ourGlobals_init ( void )
 {
    Word i;
+
+   shadowStacks = sg_malloc( "di.sg_main.oGi.2",
+                             VG_N_THREADS * sizeof shadowStacks[0] );
+   siTrees = sg_malloc( "di.sg_main.oGi.3", VG_N_THREADS * sizeof siTrees[0] );
+   qcaches = sg_malloc( "di.sg_main.oGi.4", VG_N_THREADS * sizeof qcaches[0] );
+
    for (i = 0; i < VG_N_THREADS; i++) {
       shadowStacks[i] = NULL;
       siTrees[i] = NULL;
+      qcaches[i] = (QCache){};
    }
    invalidate_all_QCaches();
    giTree = VG_(newFM)( sg_malloc, "di.sg_main.oGi.1", sg_free, 
@@ -1265,6 +1271,8 @@ static void preen_global_Invar ( Invar* inv, Addr a, SizeT len )
       case Inv_StackN:
       case Inv_Unknown:
          break;
+      case Inv_Unset: /* this should never happen */
+         /* fallthrough */
       default:
          tl_assert(0);
    }
@@ -1810,10 +1818,10 @@ void helperc__mem_access ( /* Known only at run time: */
 
    /* Did we see something different from before?  If no, then there's
       no error. */
+   tl_assert(inv->tag != Inv_Unset);
+
    if (LIKELY(eq_Invar(&new_inv, inv)))
       return;
-
-   tl_assert(inv->tag != Inv_Unset);
 
    VG_(memset)(bufE, 0, sizeof(bufE));
    show_Invar( bufE, sizeof(bufE)-1, inv, frame->depth );
@@ -1925,10 +1933,10 @@ void shadowStack_new_frame ( ThreadId tid,
 
    if (0)
    { Word d = callee->depth;
-     HChar fnname[80];
+     const HChar *fnname;
      Bool ok;
      Addr ip = ip_post_call_insn;
-     ok = VG_(get_fnname_w_offset)( ip, fnname, sizeof(fnname) );
+     ok = VG_(get_fnname_w_offset)( ip, &fnname );
      while (d > 0) {
         VG_(printf)(" ");
         d--;
@@ -2062,7 +2070,7 @@ static void shadowStack_unwind ( ThreadId tid, Addr sp_now )
 
 struct _SGEnv {
    /* the current insn's IP */
-   Addr64 curr_IP;
+   Addr curr_IP;
    /* whether the above is actually known */
    Bool curr_IP_known;
    /* if we find a mem ref, is it the first for this insn?  Used for
@@ -2080,7 +2088,7 @@ struct _SGEnv {
 
 static IRTemp gen_Get_SP ( struct _SGEnv*  sge,
                            IRSB*           bbOut,
-                           VexGuestLayout* layout,
+                           const VexGuestLayout* layout,
                            Int             hWordTy_szB )
 {
    IRExpr* sp_expr;
@@ -2098,7 +2106,7 @@ static IRTemp gen_Get_SP ( struct _SGEnv*  sge,
 
 static IRTemp gen_Get_FP ( struct _SGEnv*  sge,
                            IRSB*           bbOut,
-                           VexGuestLayout* layout,
+                           const VexGuestLayout* layout,
                            Int             hWordTy_szB )
 {
    IRExpr* fp_expr;
@@ -2121,7 +2129,7 @@ static void instrument_mem_access ( struct _SGEnv* sge,
                                     Bool    isStore,
                                     Int     hWordTy_szB,
                                     Addr    curr_IP,
-                                    VexGuestLayout* layout )
+                                    const VexGuestLayout* layout )
 {
    IRType  tyAddr      = Ity_INVALID;
    XArray* frameBlocks = NULL;
@@ -2199,7 +2207,7 @@ void sg_instrument_fini ( struct _SGEnv * env )
 void sg_instrument_IRStmt ( /*MOD*/struct _SGEnv * env, 
                             /*MOD*/IRSB* sbOut,
                             IRStmt* st,
-                            VexGuestLayout* layout,
+                            const VexGuestLayout* layout,
                             IRType gWordTy, IRType hWordTy )
 {
    if (!sg_clo_enable_sg_checks)
@@ -2223,7 +2231,7 @@ void sg_instrument_IRStmt ( /*MOD*/struct _SGEnv * env,
 
       case Ist_IMark:
          env->curr_IP_known = True;
-         env->curr_IP       = (Addr)st->Ist.IMark.addr;
+         env->curr_IP       = st->Ist.IMark.addr;
          env->firstRef      = True;
          break;
 
@@ -2334,7 +2342,7 @@ void sg_instrument_final_jump ( /*MOD*/struct _SGEnv * env,
                                 /*MOD*/IRSB* sbOut,
                                 IRExpr* next,
                                 IRJumpKind jumpkind,
-                                VexGuestLayout* layout,
+                                const VexGuestLayout* layout,
                                 IRType gWordTy, IRType hWordTy )
 {
    if (!sg_clo_enable_sg_checks)

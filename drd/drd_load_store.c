@@ -43,7 +43,7 @@
 #define STACK_POINTER_OFFSET OFFSET_amd64_RSP
 #elif defined(VGA_ppc32)
 #define STACK_POINTER_OFFSET OFFSET_ppc32_GPR1
-#elif defined(VGA_ppc64)
+#elif defined(VGA_ppc64be) || defined(VGA_ppc64le)
 #define STACK_POINTER_OFFSET OFFSET_ppc64_GPR1
 #elif defined(VGA_arm)
 #define STACK_POINTER_OFFSET OFFSET_arm_R13
@@ -55,6 +55,8 @@
 #define STACK_POINTER_OFFSET OFFSET_mips32_r29
 #elif defined(VGA_mips64)
 #define STACK_POINTER_OFFSET OFFSET_mips64_r29
+#elif defined(VGA_tilegx)
+#define STACK_POINTER_OFFSET OFFSET_tilegx_r54
 #else
 #error Unknown architecture.
 #endif
@@ -590,9 +592,9 @@ static void instrument_store(IRSB* const bb, IRExpr* addr_expr,
 
 IRSB* DRD_(instrument)(VgCallbackClosure* const closure,
                        IRSB* const bb_in,
-                       VexGuestLayout* const layout,
-                       VexGuestExtents* const vge,
-                       VexArchInfo* archinfo_host,
+                       const VexGuestLayout* const layout,
+                       const VexGuestExtents* const vge,
+                       const VexArchInfo* archinfo_host,
                        IRType const gWordTy,
                        IRType const hWordTy)
 {
@@ -624,7 +626,7 @@ IRSB* DRD_(instrument)(VgCallbackClosure* const closure,
          /* relocated in another way than by later binutils versions. The  */
          /* linker e.g. does not generate .got.plt sections on CentOS 3.0. */
       case Ist_IMark:
-         instrument = VG_(DebugInfo_sect_kind)(NULL, 0, st->Ist.IMark.addr)
+         instrument = VG_(DebugInfo_sect_kind)(NULL, st->Ist.IMark.addr)
             != Vg_SectPLT;
          addStmtToIRSB(bb, st);
          break;
@@ -633,7 +635,9 @@ IRSB* DRD_(instrument)(VgCallbackClosure* const closure,
          switch (st->Ist.MBE.event)
          {
          case Imbe_Fence:
-            break; /* not interesting */
+            break; /* not interesting to DRD */
+         case Imbe_CancelReservation:
+            break; /* not interesting to DRD */
          default:
             tl_assert(0);
          }

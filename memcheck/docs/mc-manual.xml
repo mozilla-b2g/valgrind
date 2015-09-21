@@ -45,6 +45,12 @@ problems that are common in C and C++ programs.</para>
   </listitem>
 
   <listitem>
+    <para>Passing a fishy (presumably negative) value to the
+    <computeroutput>size</computeroutput> parameter of a memory
+    allocation function.</para>
+  </listitem>
+
+  <listitem>
     <para>Memory leaks.</para>
   </listitem>
 </itemizedlist>
@@ -378,6 +384,48 @@ implementation.</para>
 </sect2>
 
 
+<sect2 id="mc-manual.fishyvalue"
+       xreflabel="Fishy argument values">
+<title>Fishy argument values</title>
+
+<para>All memory allocation functions take an argument specifying the
+size of the memory block that should be allocated. Clearly, the requested
+size should be a non-negative value and is typically not excessively large. 
+For instance, it is extremely unlikly that the size of an allocation
+request exceeds 2**63 bytes on a 64-bit machine. It is much more likely that
+such a value is the result of an erroneous size calculation and is in effect
+a negative value (that just happens to appear excessively large because
+the bit pattern is interpreted as an unsigned integer).
+Such a value is called a "fishy value".
+
+The <varname>size</varname> argument of the following allocation functions
+is checked for being fishy:
+<function>malloc</function>,
+<function>calloc</function>,
+<function>realloc</function>,
+<function>memalign</function>,
+<function>new</function>,
+<function>new []</function>. 
+<function>__builtin_new</function>,
+<function>__builtin_vec_new</function>,
+For <function>calloc</function> both arguments are being checked.
+</para>
+
+<para>For example:</para>
+<programlisting><![CDATA[
+==32233== Argument 'size' of function malloc has a fishy (possibly negative) value: -3
+==32233==    at 0x4C2CFA7: malloc (vg_replace_malloc.c:298)
+==32233==    by 0x400555: foo (fishy.c:15)
+==32233==    by 0x400583: main (fishy.c:23)
+]]></programlisting>
+
+<para>In earlier Valgrind versions those values were being referred to
+as "silly arguments" and no back-trace was included.
+</para>
+
+</sect2>
+
+
 <sect2 id="mc-manual.leaks" xreflabel="Memory leak detection">
 <title>Memory leak detection</title>
 
@@ -414,6 +462,21 @@ several ways we know of that an interior-pointer can occur:</para>
   </listitem>
     
   <listitem>
+    <para>It might be a pointer to the inner char array of a C++
+    <computeroutput>std::string</computeroutput>.  For example, some
+    compilers add 3 words at the beginning of the std::string to
+    store the length, the capacity and a reference count before the
+    memory containing the array of characters. They return a pointer
+    just after these 3 words, pointing at the char array.</para>
+  </listitem>
+
+  <listitem>
+    <para>Some code might allocate a block of memory, and use the first 8
+    bytes to store (block size - 8) as a 64bit number.
+    <computeroutput>sqlite3MemMalloc</computeroutput> does this.</para>
+  </listitem>
+
+  <listitem>
     <para>It might be a pointer to an array of C++ objects (which possess
     destructors) allocated with <computeroutput>new[]</computeroutput>.  In
     this case, some compilers store a "magic cookie" containing the array
@@ -424,15 +487,6 @@ several ways we know of that an interior-pointer can occur:</para>
   </listitem>
 
   <listitem>
-    <para>It might be a pointer to the inner char array of a C++
-    <computeroutput>std::string</computeroutput>.  For example, some
-    compilers add 3 words at the beginning of the std::string to
-    store the length, the capacity and a reference count before the
-    memory containing the array of characters. They return a pointer
-    just after these 3 words, pointing at the char array.</para>
-  </listitem>
-
-  <listitem>
     <para>It might be a pointer to an inner part of a C++ object using
     multiple inheritance. </para>
   </listitem>
@@ -440,9 +494,10 @@ several ways we know of that an interior-pointer can occur:</para>
 
 <para>You can optionally activate heuristics to use during the leak
 search to detect the interior pointers corresponding to
-the <computeroutput>newarray</computeroutput>,
-<computeroutput>stdstring</computeroutput> and
-<computeroutput>multipleinheritance</computeroutput> cases. If the
+the <computeroutput>stdstring</computeroutput>,
+<computeroutput>length64</computeroutput>,
+<computeroutput>newarray</computeroutput>
+and <computeroutput>multipleinheritance</computeroutput> cases. If the
 heuristic detects that an interior pointer corresponds to such a case,
 the block will be considered as reachable by the interior
 pointer. In other words, the interior pointer will be treated
@@ -551,8 +606,8 @@ LEAK SUMMARY:
 
 <para>If heuristics have been used to consider some blocks as
 reachable, the leak summary details the heuristically reachable subset
-of 'still reachable:' per heuristic. In the below example, of the 79
-bytes still reachable, 71 bytes (56+7+8) have been considered
+of 'still reachable:' per heuristic. In the below example, of the 95
+bytes still reachable, 87 bytes (56+7+8+16) have been considered
 heuristically reachable.
 </para>
 
@@ -561,9 +616,10 @@ LEAK SUMMARY:
    definitely lost: 4 bytes in 1 blocks
    indirectly lost: 0 bytes in 0 blocks
      possibly lost: 0 bytes in 0 blocks
-   still reachable: 79 bytes in 5 blocks
+   still reachable: 95 bytes in 6 blocks
                       of which reachable via heuristic:
                         stdstring          : 56 bytes in 2 blocks
+                        length64           : 16 bytes in 1 blocks
                         newarray           : 7 bytes in 1 blocks
                         multipleinheritance: 8 bytes in 1 blocks
         suppressed: 0 bytes in 0 blocks
@@ -683,8 +739,10 @@ is <option>--errors-for-leak-kinds=definite,possible</option>
       <para>When enabled, search for memory leaks when the client
       program finishes.  If set to <varname>summary</varname>, it says how
       many leaks occurred.  If set to <varname>full</varname> or
-      <varname>yes</varname>, it also gives details of each individual
-      leak.</para>
+      <varname>yes</varname>, each individual leak will be shown
+      in detail and/or counted as an error, as specified by the options 
+      <option>--show-leak-kinds</option> and 
+      <option>--errors-for-leak-kinds</option>. </para>
     </listitem>
   </varlistentry>
 
@@ -717,8 +775,8 @@ is <option>--errors-for-leak-kinds=definite,possible</option>
       <option><![CDATA[--show-leak-kinds=<set> [default: definite,possible] ]]></option>
     </term>
     <listitem>
-      <para>Specifies the leak kinds to show in a full leak search, in
-      one of the following ways: </para>
+      <para>Specifies the leak kinds to show in a <varname>full</varname>
+      leak search, in one of the following ways: </para>
 
       <itemizedlist>
         <listitem><para>a comma separated list of one or more of
@@ -742,7 +800,8 @@ is <option>--errors-for-leak-kinds=definite,possible</option>
       <option><![CDATA[--errors-for-leak-kinds=<set> [default: definite,possible] ]]></option>
     </term>
     <listitem>
-      <para>Specifies the leak kinds to count as errors in a full leak search. The
+      <para>Specifies the leak kinds to count as errors in a
+        <varname>full</varname> leak search. The
         <option><![CDATA[<set>]]></option> is specified similarly to
         <option>--show-leak-kinds</option>
       </para>
@@ -762,13 +821,13 @@ is <option>--errors-for-leak-kinds=definite,possible</option>
 
       <itemizedlist>
         <listitem><para>a comma separated list of one or more of
-            <option>stdstring newarray multipleinheritance</option>.</para>
+            <option>stdstring length64 newarray multipleinheritance</option>.</para>
         </listitem>
           
         <listitem><para><option>all</option> to activate the complete set of
             heuristics.
             It is equivalent to
-            <option>--leak-check-heuristics=stdstring,newarray,multipleinheritance</option>.</para>
+            <option>--leak-check-heuristics=stdstring,length64,newarray,multipleinheritance</option>.</para>
         </listitem>
         
         <listitem><para><option>none</option> for the empty set.</para>
@@ -1031,6 +1090,44 @@ is <option>--errors-for-leak-kinds=definite,possible</option>
       conversions.  This is in violation of the 32-bit PowerPC ELF
       specification, which makes no provision for locations below the
       stack pointer to be accessible.</para>
+    </listitem>
+  </varlistentry>
+
+  <varlistentry id="opt.show-mismatched-frees"
+                xreflabel="--show-mismatched-frees">
+    <term>
+      <option><![CDATA[--show-mismatched-frees=<yes|no> [default: yes] ]]></option>
+    </term>
+    <listitem>
+      <para>When enabled, Memcheck checks that heap blocks are
+      deallocated using a function that matches the allocating
+      function.  That is, it expects <varname>free</varname> to be
+      used to deallocate blocks allocated
+      by <varname>malloc</varname>, <varname>delete</varname> for
+      blocks allocated by <varname>new</varname>,
+      and <varname>delete[]</varname> for blocks allocated
+      by <varname>new[]</varname>.  If a mismatch is detected, an
+      error is reported.  This is in general important because in some
+      environments, freeing with a non-matching function can cause
+      crashes.</para>
+
+      <para>There is however a scenario where such mismatches cannot
+      be avoided.  That is when the user provides implementations of
+      <varname>new</varname>/<varname>new[]</varname> that
+      call <varname>malloc</varname> and
+      of <varname>delete</varname>/<varname>delete[]</varname> that
+      call <varname>free</varname>, and these functions are
+      asymmetrically inlined.  For example, imagine
+      that <varname>delete[]</varname> is inlined
+      but <varname>new[]</varname> is not.  The result is that
+      Memcheck "sees" all <varname>delete[]</varname> calls as direct
+      calls to <varname>free</varname>, even when the program source
+      contains no mismatched calls.</para>
+
+      <para>This causes a lot of confusing and irrelevant error
+      reports.  <varname>--show-mismatched-frees=no</varname> disables
+      these checks.  It is not generally advisable to disable them,
+      though, because you may miss real errors as a result.</para>
     </listitem>
   </varlistentry>
 
@@ -1930,7 +2027,8 @@ arguments.</para>
     <varname>VALGRIND_MAKE_MEM_DEFINED</varname>.
     These mark address ranges as completely inaccessible,
     accessible but containing undefined data, and accessible and
-    containing defined data, respectively.</para>
+    containing defined data, respectively. They return -1, when
+    run on Valgrind and 0 otherwise.</para>
   </listitem>
 
   <listitem>

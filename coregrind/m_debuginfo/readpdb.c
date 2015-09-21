@@ -949,7 +949,7 @@ union codeview_symbol
 
 struct pdb_reader
 {
-   void* (*read_file)(struct pdb_reader*, unsigned, unsigned *);
+   void* (*read_file)(const struct pdb_reader*, unsigned, unsigned *);
    // JRS 2009-Apr-8: .uu_n_pdbimage is never used.
    UChar* pdbimage;      // image address
    SizeT  uu_n_pdbimage; // size
@@ -957,17 +957,19 @@ struct pdb_reader
       struct {
          struct PDB_JG_HEADER* header;
          struct PDB_JG_TOC* toc;
+         struct PDB_JG_ROOT* root;
       } jg;
       struct {
          struct PDB_DS_HEADER* header;
          struct PDB_DS_TOC* toc;
+         struct PDB_DS_ROOT* root;
       } ds;
    } u;
 };
 
 
-static void* pdb_ds_read( struct pdb_reader* pdb,
-                          unsigned* block_list,
+static void* pdb_ds_read( const struct pdb_reader* pdb,
+                          const unsigned* block_list,
                           unsigned  size )
 {
    unsigned  blocksize, nBlocks;
@@ -976,7 +978,7 @@ static void* pdb_ds_read( struct pdb_reader* pdb,
 
    if (!size) return NULL;
    if (size > 512 * 1024 * 1024) {
-      VG_(umsg)("Warning: pdb_ds_read: implausible size "
+      VG_(umsg)("LOAD_PDB_DEBUGINFO: pdb_ds_read: implausible size "
                 "(%u); skipping -- possible invalid .pdb file?\n", size);
       return NULL;
    }
@@ -992,8 +994,8 @@ static void* pdb_ds_read( struct pdb_reader* pdb,
 }
 
 
-static void* pdb_jg_read( struct pdb_reader* pdb,
-                          unsigned short* block_list,
+static void* pdb_jg_read( const struct pdb_reader* pdb,
+                          const unsigned short* block_list,
                           int size )
 {
    unsigned  blocksize, nBlocks;
@@ -1028,7 +1030,7 @@ static void* find_pdb_header( void* pdbimage,
 }
 
 
-static void* pdb_ds_read_file( struct pdb_reader* reader,
+static void* pdb_ds_read_file( const struct pdb_reader* reader,
                                unsigned  file_number,
                                unsigned* plength )
 {
@@ -1053,7 +1055,7 @@ static void* pdb_ds_read_file( struct pdb_reader* reader,
 }
 
 
-static void* pdb_jg_read_file( struct pdb_reader* pdb,
+static void* pdb_jg_read_file( const struct pdb_reader* pdb,
                                unsigned fileNr,
                                unsigned *plength )
 {
@@ -1108,10 +1110,8 @@ static void pdb_jg_init( struct pdb_reader* reader,
 }
 
 
-
-
 static 
-void pdb_check_root_version_and_timestamp( HChar* pdbname,
+void pdb_check_root_version_and_timestamp( const HChar* pdbname,
                                            ULong  pdbmtime,
                                            unsigned  version,
                                            UInt TimeDateStamp )
@@ -1125,19 +1125,19 @@ void pdb_check_root_version_and_timestamp( HChar* pdbname,
          break;
       default:
          if (VG_(clo_verbosity) > 1)
-            VG_(message)(Vg_UserMsg,
-                         "Unknown .pdb root block version %d\n", version );
+            VG_(umsg)("LOAD_PDB_DEBUGINFO: "
+                      "Unknown .pdb root block version %d\n", version );
    }
    if ( TimeDateStamp != pdbmtime ) {
       if (VG_(clo_verbosity) > 1)
-         VG_(message)(Vg_UserMsg, 
-                     "Wrong time stamp of .PDB file %s (0x%08x, 0x%08llx)\n",
-                      pdbname, TimeDateStamp, pdbmtime );
+         VG_(umsg)("LOAD_PDB_DEBUGINFO: Wrong time stamp of .PDB file "
+                   "%s (0x%08x, 0x%08llx)\n",
+                   pdbname, TimeDateStamp, pdbmtime );
    }
 }
 
 
-static DWORD pdb_get_file_size( struct pdb_reader* reader, unsigned idx )
+static DWORD pdb_get_file_size( const struct pdb_reader* reader, unsigned idx )
 {
    if (reader->read_file == pdb_jg_read_file)
       return reader->u.jg.toc->file[idx].size;
@@ -1203,24 +1203,23 @@ static void pdb_convert_symbols_header( PDB_SYMBOLS *symbols,
 static ULong DEBUG_SnarfCodeView(
                 DebugInfo* di,
                 PtrdiffT bias,
-                IMAGE_SECTION_HEADER* sectp,
-                void* root, /* FIXME: better name */
+                const IMAGE_SECTION_HEADER* sectp,
+                const void* root, /* FIXME: better name */
                 Int offset,
                 Int size
              )
 {
    Int    i, length;
    DiSym  vsym;
-   HChar* nmstr;
-   HChar  symname[4096 /*WIN32_PATH_MAX*/];
+   const  HChar* nmstr;
+   HChar  symname[4096 /*WIN32_PATH_MAX*/];  // FIXME: really ?
 
    Bool  debug = di->trace_symtab;
    ULong n_syms_read = 0;
 
    if (debug)
-      VG_(message)(Vg_UserMsg,
-                   "BEGIN SnarfCodeView addr=%p offset=%d length=%d\n", 
-                   root, offset, size );
+      VG_(umsg)("BEGIN SnarfCodeView addr=%p offset=%d length=%d\n", 
+                root, offset, size );
 
    VG_(memset)(&vsym, 0, sizeof(vsym));  /* avoid holes */
    /*
@@ -1229,7 +1228,8 @@ static ULong DEBUG_SnarfCodeView(
     */
    for ( i = offset; i < size; i += length )
    {
-      union codeview_symbol *sym = (union codeview_symbol *)((char *)root + i);
+      const union codeview_symbol *sym =
+         (const union codeview_symbol *)((const char *)root + i);
 
       length = sym->generic.len + 2;
 
@@ -1238,14 +1238,13 @@ static ULong DEBUG_SnarfCodeView(
 
       default:
          if (0) {
+            const int *isym = (const int *)sym;
             VG_(printf)("unknown id 0x%x len=0x%x at %p\n",
                         sym->generic.id, sym->generic.len, sym);
             VG_(printf)("  %8x  %8x  %8x  %8x\n", 
-                        ((int *)sym)[1],((int *)sym)[2],
-                        ((int *)sym)[3],((int *)sym)[4]);
+                        isym[1], isym[2], isym[3], isym[4]);
             VG_(printf)("  %8x  %8x  %8x  %8x\n",
-                        ((int *)sym)[5],((int *)sym)[6],
-                        ((int *)sym)[7],((int *)sym)[8]);
+                        isym[5], isym[6], isym[7], isym[8]);
          }
          break;
       /*
@@ -1260,13 +1259,13 @@ static ULong DEBUG_SnarfCodeView(
          symname[sym->data_v1.p_name.namelen] = '\0';
 
          if (debug)
-            VG_(message)(Vg_UserMsg, "  Data %s\n", symname );
+            VG_(umsg)("  Data %s\n", symname );
 
          if (0 /*VG_(needs).data_syms*/) {
             nmstr = ML_(addStr)(di, symname, sym->data_v1.p_name.namelen);
-            vsym.addr      = bias + sectp[sym->data_v1.segment-1].VirtualAddress
+            vsym.avmas.main = bias + sectp[sym->data_v1.segment-1].VirtualAddress
                                  + sym->data_v1.offset;
-            vsym.tocptr    = 0;
+            SET_TOCPTR_AVMA(vsym.avmas, 0);
             vsym.pri_name  = nmstr;
             vsym.sec_names = NULL;
             vsym.size      = sym->data_v1.p_name.namelen;
@@ -1285,14 +1284,13 @@ static ULong DEBUG_SnarfCodeView(
          symname[k] = '\0';
 
          if (debug)
-            VG_(message)(Vg_UserMsg,
-                         "  S_GDATA_V2/S_LDATA_V2/S_PUB_V2 %s\n", symname );
+            VG_(umsg)("  S_GDATA_V2/S_LDATA_V2/S_PUB_V2 %s\n", symname );
 
          if (sym->generic.id==S_PUB_V2 /*VG_(needs).data_syms*/) {
             nmstr = ML_(addStr)(di, symname, k);
-            vsym.addr      = bias + sectp[sym->data_v2.segment-1].VirtualAddress
+            vsym.avmas.main = bias + sectp[sym->data_v2.segment-1].VirtualAddress
                                   + sym->data_v2.offset;
-            vsym.tocptr    = 0;
+            SET_TOCPTR_AVMA(vsym.avmas, 0);
             vsym.pri_name  = nmstr;
             vsym.sec_names = NULL;
             vsym.size      = 4000;
@@ -1317,16 +1315,15 @@ static ULong DEBUG_SnarfCodeView(
          symname[k] = '\0';
 
          if (debug)
-            VG_(message)(Vg_UserMsg,
-                         "  S_PUB_FUNC1_V3/S_PUB_FUNC2_V3/S_PUB_V3 %s\n",
-                         symname );
+            VG_(umsg)("  S_PUB_FUNC1_V3/S_PUB_FUNC2_V3/S_PUB_V3 %s\n",
+                      symname );
 
          if (1  /*sym->generic.id==S_PUB_FUNC1_V3 
                   || sym->generic.id==S_PUB_FUNC2_V3*/) {
             nmstr = ML_(addStr)(di, symname, k);
-            vsym.addr      = bias + sectp[sym->public_v3.segment-1].VirtualAddress
+            vsym.avmas.main = bias + sectp[sym->public_v3.segment-1].VirtualAddress
                                   + sym->public_v3.offset;
-            vsym.tocptr    = 0;
+            SET_TOCPTR_AVMA(vsym.avmas, 0);
             vsym.pri_name  = nmstr;
             vsym.sec_names = NULL;
             vsym.size      = 4000;
@@ -1360,18 +1357,17 @@ static ULong DEBUG_SnarfCodeView(
                               sym->proc_v1.p_name.namelen);
          symname[sym->proc_v1.p_name.namelen] = '\0';
          nmstr = ML_(addStr)(di, symname, sym->proc_v1.p_name.namelen);
-         vsym.addr      = bias + sectp[sym->proc_v1.segment-1].VirtualAddress
+         vsym.avmas.main = bias + sectp[sym->proc_v1.segment-1].VirtualAddress
                                + sym->proc_v1.offset;
-         vsym.tocptr    = 0;
+         SET_TOCPTR_AVMA(vsym.avmas, 0);
          vsym.pri_name  = nmstr;
          vsym.sec_names = NULL;
          vsym.size      = sym->proc_v1.proc_len;
          vsym.isText    = True;
          vsym.isIFunc   = False;
          if (debug)
-             VG_(message)(Vg_UserMsg,
-                         "  Adding function %s addr=%#lx length=%d\n",
-                         symname, vsym.addr, vsym.size );
+            VG_(umsg)("  Adding function %s addr=%#lx length=%d\n",
+                      symname, vsym.avmas.main, vsym.size );
          ML_(addSym)( di, &vsym );
          n_syms_read++;
          break;
@@ -1382,33 +1378,31 @@ static ULong DEBUG_SnarfCodeView(
                               sym->proc_v2.p_name.namelen);
          symname[sym->proc_v2.p_name.namelen] = '\0';
          nmstr = ML_(addStr)(di, symname, sym->proc_v2.p_name.namelen);
-         vsym.addr      = bias + sectp[sym->proc_v2.segment-1].VirtualAddress
+         vsym.avmas.main = bias + sectp[sym->proc_v2.segment-1].VirtualAddress
                                + sym->proc_v2.offset;
-         vsym.tocptr    = 0;
+         SET_TOCPTR_AVMA(vsym.avmas, 0);
          vsym.pri_name  = nmstr;
          vsym.sec_names = NULL;
          vsym.size      = sym->proc_v2.proc_len;
          vsym.isText    = True;
          vsym.isIFunc   = False;
          if (debug)
-            VG_(message)(Vg_UserMsg,
-                         "  Adding function %s addr=%#lx length=%d\n",
-                         symname, vsym.addr, vsym.size );
+            VG_(umsg)("  Adding function %s addr=%#lx length=%d\n",
+                      symname, vsym.avmas.main, vsym.size );
          ML_(addSym)( di, &vsym );
          n_syms_read++;
          break;
       case S_LPROC_V3:
       case S_GPROC_V3: {
          if (debug)
-            VG_(message)(Vg_UserMsg,
-                         "  S_LPROC_V3/S_GPROC_V3 %s\n", sym->proc_v3.name );
+            VG_(umsg)("  S_LPROC_V3/S_GPROC_V3 %s\n", sym->proc_v3.name );
 
          if (1) {
             nmstr = ML_(addStr)(di, sym->proc_v3.name,
                                     VG_(strlen)(sym->proc_v3.name));
-            vsym.addr      = bias + sectp[sym->proc_v3.segment-1].VirtualAddress
+            vsym.avmas.main = bias + sectp[sym->proc_v3.segment-1].VirtualAddress
                                   + sym->proc_v3.offset;
-            vsym.tocptr    = 0;
+            SET_TOCPTR_AVMA(vsym.avmas, 0);
             vsym.pri_name  = nmstr;
             vsym.sec_names = NULL;
             vsym.size      = sym->proc_v3.proc_len;
@@ -1479,7 +1473,7 @@ static ULong DEBUG_SnarfCodeView(
       case S_PROCREF_V1:
       case S_DATAREF_V1:
       case S_LPROCREF_V1: {
-         unsigned char *name = (unsigned char *)sym + length;
+         const unsigned char *name = (const unsigned char *)sym + length;
          length += (*name + 1 + 3) & ~3;
          break;
       }
@@ -1488,9 +1482,8 @@ static ULong DEBUG_SnarfCodeView(
    } /* for ( i = offset; i < size; i += length ) */
 
    if (debug)
-      VG_(message)(Vg_UserMsg,
-                   "END SnarfCodeView addr=%p offset=%d length=%d\n", 
-                   root, offset, size );
+      VG_(umsg)("END SnarfCodeView addr=%p offset=%d length=%d\n", 
+                root, offset, size );
    return n_syms_read;
 }
 
@@ -1518,8 +1511,8 @@ struct startend
 static ULong DEBUG_SnarfLinetab(
           DebugInfo* di,
           PtrdiffT bias,
-          IMAGE_SECTION_HEADER* sectp,
-          void* linetab,
+          const IMAGE_SECTION_HEADER* sectp,
+          const void* linetab,
           Int size
        )
 {
@@ -1542,9 +1535,7 @@ static ULong DEBUG_SnarfLinetab(
    ULong n_lines_read = 0;
 
    if (debug)
-      VG_(message)(Vg_UserMsg,
-                   "BEGIN SnarfLineTab linetab=%p size=%d\n", 
-                   linetab, size );
+      VG_(umsg)("BEGIN SnarfLineTab linetab=%p size=%d\n", linetab, size);
 
    /*
     * Now get the important bits.
@@ -1560,19 +1551,20 @@ static ULong DEBUG_SnarfLinetab(
     */
    nseg = 0;
    for (i = 0; i < nfile; i++) {
-      pnt2.c = (HChar *)linetab + filetab[i];
+      pnt2.c = (const HChar *)linetab + filetab[i];
       nseg += *pnt2.s;
    }
 
    this_seg = 0;
    for (i = 0; i < nfile; i++) {
-      HChar *fnmstr;
-      HChar *dirstr;
+      const HChar *fnmstr;
+      const HChar *dirstr;
+      UInt  fnmdirstr_ix;
 
       /*
        * Get the pointer into the segment information.
        */
-      pnt2.c = (HChar *)linetab + filetab[i];
+      pnt2.c = (const HChar *)linetab + filetab[i];
       file_segcount = *pnt2.s;
 
       pnt2.ui++;
@@ -1599,12 +1591,13 @@ static ULong DEBUG_SnarfLinetab(
       k = VG_(strlen)(fnmstr);
       dirstr = ML_(addStr)(di, filename, *fn - k);
       fnmstr = ML_(addStr)(di, fnmstr, k);
+      fnmdirstr_ix = ML_(addFnDn) (di, fnmstr, dirstr);
 
       for (k = 0; k < file_segcount; k++, this_seg++) {
          Int linecount;
          Int segno;
 
-         pnt2.c = (HChar *)linetab + lt_ptr[k];
+         pnt2.c = (const HChar *)linetab + lt_ptr[k];
 
          segno = *pnt2.s++;
          linecount = *pnt2.s++;
@@ -1613,7 +1606,7 @@ static ULong DEBUG_SnarfLinetab(
             UInt j;
 
             if (debug)
-               VG_(message)(Vg_UserMsg,
+               VG_(umsg)(
                   "  Adding %d lines for file %s segment %d addr=%#x end=%#x\n",
                   linecount, filename, segno, start[k].start, start[k].end );
 
@@ -1625,12 +1618,14 @@ static ULong DEBUG_SnarfLinetab(
                                            ? pnt2.ui[j+1] 
                                            : start[k].end);
                if (debug)
-                  VG_(message)(Vg_UserMsg,
+                  VG_(umsg)(
                      "  Adding line %d addr=%#lx end=%#lx\n", 
-                        ((const unsigned short *)(pnt2.ui + linecount))[j],
-                        startaddr, endaddr );
+                     ((const unsigned short *)(pnt2.ui + linecount))[j],
+                     startaddr, endaddr );
                   ML_(addLineInfo)(
-                     di, fnmstr, dirstr, startaddr, endaddr,
+                     di, 
+                     fnmdirstr_ix,
+                     startaddr, endaddr,
                      ((const unsigned short *)(pnt2.ui + linecount))[j], j );
                   n_lines_read++;
                }
@@ -1639,9 +1634,8 @@ static ULong DEBUG_SnarfLinetab(
     }
 
    if (debug)
-      VG_(message)(Vg_UserMsg,
-                   "END SnarfLineTab linetab=%p size=%d\n", 
-                   linetab, size );
+      VG_(umsg)("END SnarfLineTab linetab=%p size=%d\n", 
+                linetab, size );
 
     return n_lines_read;
 }
@@ -1656,7 +1650,7 @@ static ULong DEBUG_SnarfLinetab(
  * an array (starting at <lineblk_offset>) of codeview_linetab2_block structures
  */
 
-struct codeview_linetab2_file
+typedef struct codeview_linetab2_file
 {
     DWORD       offset;         /* offset in string table for filename */
     WORD        unk;            /* always 0x0110... type of following
@@ -1664,9 +1658,9 @@ struct codeview_linetab2_file
     BYTE        md5[16];        /* MD5 signature of file (signature on
                                    file's content or name ???) */
     WORD        pad0;           /* always 0 */
-};
+} codeview_linetab2_file;
 
-struct codeview_linetab2_block
+typedef struct codeview_linetab2_block
 {
     DWORD       header;         /* 0x000000f2 */
     DWORD       size_of_block;  /* next block is at # bytes after this field */
@@ -1683,35 +1677,35 @@ struct codeview_linetab2_block
         DWORD   lineno;         /* the line number (OR:ed with
                                    0x80000000 why ???) */
     } l[1];                     /* actually array of <nlines> */
-};
+} codeview_linetab2_block;
 
 static ULong codeview_dump_linetab2(
                 DebugInfo* di,
                 Addr bias,
-                IMAGE_SECTION_HEADER* sectp,
-                HChar* linetab,
+                const IMAGE_SECTION_HEADER* sectp,
+                const HChar* linetab,
                 DWORD size,
-                HChar* strimage,
+                const HChar* strimage,
                 DWORD strsize,
                 const HChar* pfx
              )
 {
    DWORD       offset;
    unsigned    i;
-   struct codeview_linetab2_block* lbh;
-   struct codeview_linetab2_file* fd;
+   const codeview_linetab2_block* lbh;
+   const codeview_linetab2_file* fd;
 
    Bool  debug = di->trace_symtab;
    ULong n_line2s_read = 0;
 
    if (*(const DWORD*)linetab != 0x000000f4)
       return 0;
-   offset = *((DWORD*)linetab + 1);
-   lbh = (struct codeview_linetab2_block*)(linetab + 8 + offset);
+   offset = *((const DWORD*)linetab + 1);
+   lbh = (const codeview_linetab2_block*)(linetab + 8 + offset);
 
-   while ((HChar*)lbh < linetab + size) {
+   while ((const HChar*)lbh < linetab + size) {
 
-      HChar *filename, *dirname;
+      UInt filedirname_ix;
       Addr svma_s, svma_e;
       if (lbh->header != 0x000000f2) {
          /* FIXME: should also check that whole lbh fits in linetab + size */
@@ -1723,7 +1717,7 @@ static ULong codeview_dump_linetab2(
          VG_(printf)("%sblock from %04x:%08x-%08x (size %u) (%u lines)\n",
                      pfx, lbh->seg, lbh->start, lbh->start + lbh->size - 1,
                      lbh->size, lbh->nlines);
-      fd = (struct codeview_linetab2_file*)(linetab + 8 + lbh->file_offset);
+      fd = (const codeview_linetab2_file*)(linetab + 8 + lbh->file_offset);
       if (debug)
          VG_(printf)(
             "%s  md5=%02x%02x%02x%02x%02x%02x%02x%02x"
@@ -1733,17 +1727,23 @@ static ULong codeview_dump_linetab2(
                   fd->md5[ 8], fd->md5[ 9], fd->md5[10], fd->md5[11],
                   fd->md5[12], fd->md5[13], fd->md5[14], fd->md5[15] );
       /* FIXME: should check that string is within strimage + strsize */
+      const HChar* filename = NULL; // in ML_(addStr) space
+      const HChar* dirname  = NULL; // in ML_(addStr) space
       if (strimage) {
-         dirname  = strimage + fd->offset;
-         filename = VG_(strrchr)(dirname, '\\');
-         if (filename == NULL) {
-            filename = ML_(addStr)(di, dirname, -1);
+         const HChar* strI = strimage + fd->offset;
+         /* Copy |strI| into mutable storage, temporarily, so we can put a zero
+            byte in place of the last pathname separator. */
+         HChar* strM  = ML_(dinfo_strdup)("di.readpe.cdl2.1", strI);
+         HChar* fname = VG_(strrchr)(strM, '\\');
+         if (fname == NULL) {
+            filename = ML_(addStr)(di, strM, -1);
             dirname  = NULL;
          } else {
-            dirname  = ML_(addStr)(di, dirname, VG_(strlen)(dirname) 
-                                                - VG_(strlen)(filename));
-            filename = ML_(addStr)(di, filename+1, -1);
+            *fname++ = '\0';
+            filename = ML_(addStr)(di, fname, -1);
+            dirname  = ML_(addStr)(di, strM, -1);
          }
+         ML_(dinfo_free)(strM);
       } else {
          filename = ML_(addStr)(di, "???", -1);
          dirname  = NULL;
@@ -1751,6 +1751,8 @@ static ULong codeview_dump_linetab2(
 
       if (debug)
          VG_(printf)("%s  file=%s\n", pfx, filename);
+
+      filedirname_ix = ML_(addFnDn) (di, filename, dirname);
 
       for (i = 0; i < lbh->nlines; i++) {
          if (debug)
@@ -1767,7 +1769,8 @@ static ULong codeview_dump_linetab2(
             if (debug)
                VG_(printf)("%s  line %d: %08lx to %08lx\n",
                            pfx, lbh->l[i].lineno ^ 0x80000000, svma_s, svma_e);
-            ML_(addLineInfo)( di, filename, dirname,
+            ML_(addLineInfo)( di, 
+                              filedirname_ix,
                               bias + svma_s,
                               bias + svma_e + 1,
                               lbh->l[i].lineno ^ 0x80000000, 0 );
@@ -1781,15 +1784,16 @@ static ULong codeview_dump_linetab2(
             VG_(printf)("%s  line %d: %08lx to %08lx\n",
                         pfx, lbh->l[ lbh->nlines-1  ].lineno ^ 0x80000000,
                         svma_s, svma_e);
-          ML_(addLineInfo)( di, filename, dirname,
+          ML_(addLineInfo)( di, 
+                            filedirname_ix,
                             bias + svma_s,
                             bias + svma_e + 1,
                             lbh->l[lbh->nlines-1].lineno ^ 0x80000000, 0 );
           n_line2s_read++;
        }
 
-       lbh = (struct codeview_linetab2_block*)
-                ((char*)lbh + 8 + lbh->size_of_block);
+       lbh = (const codeview_linetab2_block*)
+                ((const char*)lbh + 8 + lbh->size_of_block);
     }
     return n_line2s_read;
 }
@@ -1816,13 +1820,79 @@ static Int cmp_FPO_DATA_for_canonicalisation ( const void* f1V,
    return 0; /* identical in both start and length */
 }
 
+static unsigned get_stream_by_name(const struct pdb_reader* pdb, const char* name)
+{
+    const DWORD* pdw;
+    const DWORD* ok_bits;
+    DWORD        cbstr, count;
+    DWORD        string_idx, stream_idx;
+    unsigned     i;
+    const char*  str;
+
+    if (pdb->read_file == pdb_jg_read_file)
+    {
+        str = pdb->u.jg.root->names;
+        cbstr = pdb->u.jg.root->cbNames;
+    }
+    else
+    {
+        str = pdb->u.ds.root->names;
+        cbstr = pdb->u.ds.root->cbNames;
+    }
+
+    pdw = (const DWORD*)(str + cbstr);
+    pdw++; /* number of ok entries */
+    count = *pdw++;
+
+    /* bitfield: first dword is len (in dword), then data */
+    ok_bits = pdw;
+    pdw += *ok_bits++ + 1;
+    if (*pdw++ != 0)
+    {
+        if (VG_(clo_verbosity) > 1)
+           VG_(umsg)("LOAD_PDB_DEBUGINFO: "
+                     "get_stream_by_name: unexpected value\n");
+        return -1;
+    }
+
+    for (i = 0; i < count; i++)
+    {
+        if (ok_bits[i / 32] & (1 << (i % 32)))
+        {
+            string_idx = *pdw++;
+            stream_idx = *pdw++;
+            if (!VG_(strcmp)(name, &str[string_idx])) return stream_idx;
+        }
+    }
+    return -1;
+}
+ 
+
+static void *read_string_table(const struct pdb_reader* pdb)
+{
+    unsigned    stream_idx;
+    void*       ret;
+
+    stream_idx = get_stream_by_name(pdb, "/names");
+    if (stream_idx == -1) return NULL;
+    ret = pdb->read_file(pdb, stream_idx,0);
+    if (ret && *(const DWORD*)ret == 0xeffeeffe) {
+       return ret;
+    }
+    if (VG_(clo_verbosity) > 1)
+       VG_(umsg)("LOAD_PDB_DEBUGINFO: read_string_table: "
+                 "wrong header 0x%08x, expecting 0xeffeeffe\n",
+                 *(const DWORD*)ret);
+    ML_(dinfo_free)( ret );
+    return NULL;
+}
 
 /* JRS fixme: compare with version in current Wine sources */
-static void pdb_dump( struct pdb_reader* pdb,
+static void pdb_dump( const struct pdb_reader* pdb,
                       DebugInfo* di,
                       Addr       pe_avma,
                       PtrdiffT   pe_bias,
-                      IMAGE_SECTION_HEADER* sectp_avma )
+                      const IMAGE_SECTION_HEADER* sectp_avma )
 {
    Int header_size;
 
@@ -1830,7 +1900,7 @@ static void pdb_dump( struct pdb_reader* pdb,
    PDB_SYMBOLS symbols;
    unsigned len_modimage;
    char *modimage;
-   char *file; 
+   const char *file; 
 
    Bool debug = di->trace_symtab;
 
@@ -1845,18 +1915,12 @@ static void pdb_dump( struct pdb_reader* pdb,
    /* establish filesimage and filessize.  These are only needed for
       reading linetab2 tables, as far as I can deduce from the Wine
       sources. */
-   char* filesimage = pdb->read_file( pdb, 12, 0);   /* FIXME: really fixed ??? */
-   UInt  filessize  = 0;
+   DWORD filessize  = 0;
+   char* filesimage = read_string_table(pdb);
    if (filesimage) {
-      if (*(const DWORD*)filesimage == 0xeffeeffe) {
-         filessize = *(const DWORD*)(filesimage + 8);
-      } else {
-         if (0)
-            VG_(printf)("wrong header %x expecting 0xeffeeffe\n",
-                        *(const DWORD*)filesimage);
-         ML_(dinfo_free)( (void*)filesimage);
-         filesimage = NULL;
-      }
+      filessize = *(const DWORD*)(filesimage + 8);
+   } else {
+      VG_(umsg)("LOAD_PDB_DEBUGINFO: pdb_dump: string table not found\n");
    }
 
    /* Since we just use the FPO data without reformatting, at least
@@ -2034,9 +2098,8 @@ static void pdb_dump( struct pdb_reader* pdb,
          break;
       default:
          if (VG_(clo_verbosity) > 1)
-            VG_(message)(Vg_UserMsg,
-                         "Unknown .pdb type info version %ld\n",
-                         types.version );
+            VG_(umsg)("LOAD_PDB_DEBUGINFO: "
+                      "Unknown .pdb type info version %ld\n", types.version );
    }
 
    header_size = 0;
@@ -2049,9 +2112,9 @@ static void pdb_dump( struct pdb_reader* pdb,
          break;
       default:
          if (VG_(clo_verbosity) > 1)
-            VG_(message)(Vg_UserMsg,
-                         "Unknown .pdb symbol info version %ld\n",
-                         symbols.version );
+            VG_(umsg)("LOAD_PDB_DEBUGINFO: "
+                      "Unknown .pdb symbol info version %ld\n",
+                      symbols.version );
    }
 
    /*
@@ -2062,9 +2125,9 @@ static void pdb_dump( struct pdb_reader* pdb,
       if (debug)
          VG_(umsg)("\n");
       if (VG_(clo_verbosity) > 1)
-         VG_(message)(Vg_UserMsg, "Reading global symbols\n" );
+         VG_(umsg)("LOAD_PDB_DEBUGINFO: Reading global symbols\n" );
       DEBUG_SnarfCodeView( di, pe_avma, sectp_avma, modimage, 0, len_modimage );
-      ML_(dinfo_free)( (void*)modimage );
+      ML_(dinfo_free)( modimage );
    }
 
    /*
@@ -2073,17 +2136,17 @@ static void pdb_dump( struct pdb_reader* pdb,
    file = symbols_image + header_size;
    while ( file - symbols_image < header_size + symbols.module_size ) {
       int file_nr, /* file_index, */ symbol_size, lineno_size;
-      char *file_name;
+      const char *file_name;
 
       if ( symbols.version < 19970000 ) {
-         PDB_SYMBOL_FILE *sym_file = (PDB_SYMBOL_FILE *) file;
+         const PDB_SYMBOL_FILE *sym_file = (const PDB_SYMBOL_FILE *) file;
          file_nr     = sym_file->file;
          file_name   = sym_file->filename;
          /* file_index  = sym_file->range.index; */ /* UNUSED */
          symbol_size = sym_file->symbol_size;
          lineno_size = sym_file->lineno_size;
       } else {
-         PDB_SYMBOL_FILE_EX *sym_file = (PDB_SYMBOL_FILE_EX *) file;
+         const PDB_SYMBOL_FILE_EX *sym_file = (const PDB_SYMBOL_FILE_EX *) file;
          file_nr     = sym_file->file;
          file_name   = sym_file->filename;
          /* file_index  = sym_file->range.index; */ /* UNUSED */
@@ -2103,7 +2166,7 @@ static void pdb_dump( struct pdb_reader* pdb,
             if (debug)
                VG_(umsg)("\n");
             if (VG_(clo_verbosity) > 1)
-               VG_(message)(Vg_UserMsg, "Reading symbols for %s\n",
+               VG_(umsg)("LOAD_PDB_DEBUGINFO: Reading symbols for %s\n",
                                         file_name );
             n_syms_read 
                += DEBUG_SnarfCodeView( di, pe_avma, sectp_avma, modimage,
@@ -2115,7 +2178,8 @@ static void pdb_dump( struct pdb_reader* pdb,
             if (debug)
                VG_(umsg)("\n");
             if (VG_(clo_verbosity) > 1)
-               VG_(message)(Vg_UserMsg, "Reading lines for %s\n", file_name );
+               VG_(umsg)("LOAD_PDB_DEBUGINFO: "
+                         "Reading lines for %s\n", file_name );
             n_lines_read
                += DEBUG_SnarfLinetab( di, pe_avma, sectp_avma,
                                           modimage + symbol_size, lineno_size );
@@ -2125,6 +2189,7 @@ static void pdb_dump( struct pdb_reader* pdb,
           * the line number information, and it's not clear yet when
           * to call for linetab2...
           */
+         if (0) VG_(printf)("Reading lines for %s\n", file_name );
          n_line2s_read
             += codeview_dump_linetab2(
                   di, pe_avma, sectp_avma,
@@ -2137,11 +2202,11 @@ static void pdb_dump( struct pdb_reader* pdb,
                   filessize, "        "
                );
 
-         ML_(dinfo_free)( (void*)modimage );
+         ML_(dinfo_free)( modimage );
       }
 
       file_name += VG_(strlen)(file_name) + 1;
-      file = (char *)( 
+      file = (const char *)( 
                 (unsigned long)(file_name
                                 + VG_(strlen)(file_name) + 1 + 3) & ~3 );
    }
@@ -2154,14 +2219,14 @@ static void pdb_dump( struct pdb_reader* pdb,
    if ( pdb->u.jg.toc ) ML_(dinfo_free)( pdb->u.jg.toc );
 
    if (VG_(clo_verbosity) > 1) {
-      VG_(message)(Vg_DebugMsg,
-                   "   # symbols read = %llu\n", n_syms_read );
-      VG_(message)(Vg_DebugMsg,
-                   "   # lines   read = %llu\n", n_lines_read );
-      VG_(message)(Vg_DebugMsg,
-                   "   # line2s  read = %llu\n", n_line2s_read );
-      VG_(message)(Vg_DebugMsg,
-                   "   # fpos    read = %llu\n", n_fpos_read );
+      VG_(dmsg)("LOAD_PDB_DEBUGINFO:"
+                "    # symbols read = %llu\n", n_syms_read );
+      VG_(dmsg)("LOAD_PDB_DEBUGINFO:"
+                "    # lines   read = %llu\n", n_lines_read );
+      VG_(dmsg)("LOAD_PDB_DEBUGINFO:"
+                "    # line2s  read = %llu\n", n_line2s_read );
+      VG_(dmsg)("LOAD_PDB_DEBUGINFO:"
+                "    # fpos    read = %llu\n", n_fpos_read );
    }
 }
 
@@ -2180,7 +2245,7 @@ Bool ML_(read_pdb_debug_info)(
         PtrdiffT   obj_bias,
         void*      pdbimage,
         SizeT      n_pdbimage,
-        HChar*     pdbname,
+        const HChar* pdbname,
         ULong      pdbmtime
      )
 {
@@ -2196,7 +2261,7 @@ Bool ML_(read_pdb_debug_info)(
    IMAGE_SECTION_HEADER* pe_sechdr_avma;
 
    if (VG_(clo_verbosity) > 1)
-       VG_(message)(Vg_UserMsg, "Processing PDB file %s\n", pdbname );
+       VG_(umsg)("LOAD_PDB_DEBUGINFO: Processing PDB file %s\n", pdbname );
 
    dos_avma = (IMAGE_DOS_HEADER *)obj_avma;
    if (dos_avma->e_magic != IMAGE_DOS_SIGNATURE)
@@ -2236,10 +2301,10 @@ Bool ML_(read_pdb_debug_info)(
          char name[9];
          VG_(memcpy)(name, pe_sechdr_avma->Name, 8);
          name[8] = '\0';
-         VG_(message)(Vg_UserMsg,
-                      "  Scanning PE section %ps at avma %#lx svma %#lx\n",
-                      name, obj_avma + pe_sechdr_avma->VirtualAddress,
-                      pe_sechdr_avma->VirtualAddress);
+         VG_(umsg)("LOAD_PDB_DEBUGINFO:"
+                   "   Scanning PE section %ps at avma %#lx svma %#lx\n",
+                   name, obj_avma + pe_sechdr_avma->VirtualAddress,
+                   pe_sechdr_avma->VirtualAddress);
       }
 
       if (pe_sechdr_avma->Characteristics & IMAGE_SCN_MEM_DISCARDABLE)
@@ -2248,7 +2313,7 @@ Bool ML_(read_pdb_debug_info)(
       mapped_avma     = (Addr)obj_avma + pe_sechdr_avma->VirtualAddress;
       mapped_end_avma = mapped_avma + pe_sechdr_avma->Misc.VirtualSize;
 
-      struct _DebugInfoMapping map;
+      DebugInfoMapping map;
       map.avma = mapped_avma;
       map.size = pe_sechdr_avma->Misc.VirtualSize;
       map.foff = pe_sechdr_avma->PointerToRawData;
@@ -2316,24 +2381,24 @@ Bool ML_(read_pdb_debug_info)(
 
    if (VG_(clo_verbosity) > 1) {
       for (i = 0; i < VG_(sizeXA)(di->fsm.maps); i++) {
-         struct _DebugInfoMapping* map = VG_(indexXA)(di->fsm.maps, i);
+         const DebugInfoMapping* map = VG_(indexXA)(di->fsm.maps, i);
          if (map->rx)
-            VG_(message)(Vg_DebugMsg,
-                         "rx_map: avma %#lx size %7lu foff %llu\n",
-                         map->avma, map->size, (Off64T)map->foff);
+            VG_(dmsg)("LOAD_PDB_DEBUGINFO: "
+                      "rx_map: avma %#lx size %7lu foff %llu\n",
+                      map->avma, map->size, (Off64T)map->foff);
       }
       for (i = 0; i < VG_(sizeXA)(di->fsm.maps); i++) {
-         struct _DebugInfoMapping* map = VG_(indexXA)(di->fsm.maps, i);
+         const DebugInfoMapping* map = VG_(indexXA)(di->fsm.maps, i);
          if (map->rw)
-            VG_(message)(Vg_DebugMsg,
-                         "rw_map: avma %#lx size %7lu foff %llu\n",
-                         map->avma, map->size, (Off64T)map->foff);
+            VG_(dmsg)("LOAD_PDB_DEBUGINFO: "
+                      "rw_map: avma %#lx size %7lu foff %llu\n",
+                      map->avma, map->size, (Off64T)map->foff);
       }
 
-      VG_(message)(Vg_DebugMsg,
-                   "  text: avma %#lx svma %#lx size %7lu bias %#lx\n",
-                   di->text_avma, di->text_svma,
-                   di->text_size, di->text_bias);
+      VG_(dmsg)("LOAD_PDB_DEBUGINFO: "
+                "  text: avma %#lx svma %#lx size %7lu bias %#lx\n",
+                di->text_avma, di->text_svma,
+                di->text_size, di->text_bias);
    }
 
    /*
@@ -2351,24 +2416,30 @@ Bool ML_(read_pdb_debug_info)(
       struct PDB_DS_ROOT* root;
       pdb_ds_init( &reader, pdbimage, n_pdbimage );
       root = reader.read_file( &reader, 1, 0 );
+      reader.u.ds.root = root;
       if (root) {
          pdb_check_root_version_and_timestamp(
             pdbname, pdbmtime, root->version, root->TimeDateStamp );
-         ML_(dinfo_free)( root );
       }
       pdb_dump( &reader, di, obj_avma, obj_bias, sectp_avma );
+      if (root) {
+         ML_(dinfo_free)( root );
+      }
    }
    else
    if (0==VG_(strncmp)((char const *)&signature, "JG\0\0", 4)) {
       struct PDB_JG_ROOT* root;
       pdb_jg_init( &reader, pdbimage, n_pdbimage );
       root = reader.read_file( &reader, 1, 0 );
+      reader.u.jg.root = root;	
       if (root) {
          pdb_check_root_version_and_timestamp(
             pdbname, pdbmtime, root->version, root->TimeDateStamp);
-         ML_(dinfo_free)( root );
       }
       pdb_dump( &reader, di, obj_avma, obj_bias, sectp_avma );
+      if (root) {
+         ML_(dinfo_free)( root );
+      }
    }
 
    if (1) {
@@ -2403,12 +2474,13 @@ Bool ML_(read_pdb_debug_info)(
    ML_(dinfo_free).
 */
 
-HChar* ML_(find_name_of_pdb_file)( HChar* pename )
+HChar* ML_(find_name_of_pdb_file)( const HChar* pename )
 {
    /* This is a giant kludge, of the kind "you did WTF?!?", but it
       works. */
    Bool   do_cleanup = False;
-   HChar  tmpname[VG_(mkstemp_fullname_bufsz)(50-1)], tmpnameroot[50];
+   HChar  tmpnameroot[50];     // large enough
+   HChar  tmpname[VG_(mkstemp_fullname_bufsz)(sizeof tmpnameroot - 1)];
    Int    fd, r;
    HChar* res = NULL;
 
@@ -2421,14 +2493,14 @@ HChar* ML_(find_name_of_pdb_file)( HChar* pename )
    VG_(memset)(tmpname, 0, sizeof(tmpname));
    fd = VG_(mkstemp)( tmpnameroot, tmpname );
    if (fd == -1) {
-      VG_(message)(Vg_UserMsg,
-                   "Find PDB file: Can't create /tmp file %s\n", tmpname);
+      VG_(umsg)("LOAD_PDB_DEBUGINFO: "
+                "Find PDB file: Can't create temporary file %s\n", tmpname);
       goto out;
    }
    do_cleanup = True;
 
    /* Make up the command to run, essentially:
-      sh -c "strings (pename) | egrep '\.pdb|\.PDB' > (tmpname)"
+      sh -c "strings (pename) | egrep '\.pdb$|\.PDB$' > (tmpname)"
    */
    const HChar* sh      = "/bin/sh";
    const HChar* strings = "/usr/bin/strings";
@@ -2439,16 +2511,15 @@ HChar* ML_(find_name_of_pdb_file)( HChar* pename )
                 + VG_(strlen)(egrep) + VG_(strlen)(tmpname)
                 + 100/*misc*/;
    HChar* cmd = ML_(dinfo_zalloc)("di.readpe.fnopf.cmd", cmdlen);
-   vg_assert(cmd);
-   VG_(sprintf)(cmd, "%s -c \"%s '%s' | %s '\\.pdb|\\.PDB' >> %s\"",
+   VG_(sprintf)(cmd, "%s -c \"%s '%s' | %s '\\.pdb$|\\.PDB$' >> %s\"",
                      sh, strings, pename, egrep, tmpname);
    vg_assert(cmd[cmdlen-1] == 0);
    if (0) VG_(printf)("QQQQQQQQ: %s\n", cmd);
 
    r = VG_(system)( cmd );
    if (r) {
-      VG_(message)(Vg_DebugMsg,
-                   "Find PDB file: Command failed:\n   %s\n", cmd);
+      VG_(dmsg)("LOAD_PDB_DEBUGINFO: "
+                "Find PDB file: Command failed:\n   %s\n", cmd);
       goto out;
    }
 
@@ -2458,29 +2529,28 @@ HChar* ML_(find_name_of_pdb_file)( HChar* pename )
 
    SysRes sr = VG_(stat)(tmpname, &stat_buf);
    if (sr_isError(sr)) {
-      VG_(umsg)("Find PDB file: can't stat %s\n", tmpname);
+      VG_(umsg)("LOAD_PDB_DEBUGINFO: Find PDB file: can't stat %s\n", tmpname);
       goto out;
    }
 
    Int szB = (Int)stat_buf.size;
    if (szB == 0) {
-      VG_(umsg)("Find PDB file: %s is empty\n", tmpname);
+      VG_(umsg)("LOAD_PDB_DEBUGINFO: Find PDB file: %s is empty\n", tmpname);
       goto out;
    }
    /* 6 == strlen("X.pdb\n") */
    if (szB < 6 || szB > 1024/*let's say*/) {
-      VG_(umsg)("Find PDB file: %s has implausible size %d\n",
+      VG_(umsg)("LOAD_PDB_DEBUGINFO: Find PDB file: %s has implausible size %d\n",
                 tmpname, szB);
       goto out;
    }
 
    HChar* pdbname = ML_(dinfo_zalloc)("di.readpe.fnopf.pdbname", szB + 1);
-   vg_assert(pdbname);
    pdbname[szB] = 0;
 
    Int nread = VG_(read)(fd, pdbname, szB);
    if (nread != szB) {
-      VG_(umsg)("Find PDB file: read of %s failed\n", tmpname);
+      VG_(umsg)("LOAD_PDB_DEBUGINFO: Find PDB file: read of %s failed\n", tmpname);
       goto out;
    }
    vg_assert(pdbname[szB] == 0);
@@ -2495,7 +2565,7 @@ HChar* ML_(find_name_of_pdb_file)( HChar* pename )
       if (pdbname[i] == '\n') saw_n_crs++;
    }
    if (!saw_dot || saw_n_crs != 1 || pdbname[szB-1] != '\n') {
-      VG_(umsg)("Find PDB file: can't make sense of: %s\n", pdbname);
+      VG_(umsg)("LOAD_PDB_DEBUGINFO: Find PDB file: can't make sense of: %s\n", pdbname);
       goto out;
    }
    /* Change the \n to a terminating zero, so we have a "normal" string */

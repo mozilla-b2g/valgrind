@@ -36,7 +36,6 @@
 #include "pub_core_basics.h"
 #include "pub_core_vki.h"
 #include "pub_core_vkiscnums.h"
-#include "pub_core_libcsetjmp.h"    // to keep _threadstate.h happy
 #include "pub_core_threadstate.h"
 #include "pub_core_aspacemgr.h"
 #include "pub_core_libcbase.h"
@@ -49,7 +48,7 @@
 #include "pub_core_tooliface.h"
 #include "pub_core_trampoline.h"
 #include "pub_core_transtab.h"      // VG_(discard_translations)
-
+#include "priv_sigframe.h"
 
 /* This module creates and removes signal frames for signal deliveries
    on ppc32-linux.
@@ -107,7 +106,7 @@ struct nonrt_sigframe {
    struct vki_sigcontext sigcontext;
    struct vki_mcontext mcontext;
    struct vg_sig_private priv;
-   unsigned char abigap[224];
+   unsigned char abigap[224];    // unused
 };
 
 /* Structure put on stack for signal handlers with SA_SIGINFO set. */
@@ -116,7 +115,7 @@ struct rt_sigframe {
    vki_siginfo_t siginfo;
    struct vki_ucontext ucontext;
    struct vg_sig_private priv;
-   unsigned char abigap[224];
+   unsigned char abigap[224];    // unused
 };
 
 #define SET_SIGNAL_LR(zztst, zzval)                          \
@@ -183,7 +182,7 @@ void stack_mcontext ( struct vki_mcontext *mc,
    VG_TRACK( post_mem_write,  Vg_CoreSignal, tst->tid, 
              (Addr)&mc->mc_pad, sizeof(mc->mc_pad) );
    /* invalidate any translation of this area */
-   VG_(discard_translations)( (Addr64)(Addr)&mc->mc_pad, 
+   VG_(discard_translations)( (Addr)&mc->mc_pad, 
                               sizeof(mc->mc_pad), "stack_mcontext" );   
 
    /* set the signal handler to return to the trampoline */
@@ -502,48 +501,6 @@ void stack_mcontext ( struct vki_mcontext *mc,
 //..                   Vg_CoreSignal, zztid, VG_O_STACK_PTR, sizeof(Addr))
 */
 
-/* Extend the stack segment downwards if needed so as to ensure the
-   new signal frames are mapped to something.  Return a Bool
-   indicating whether or not the operation was successful.
-*/
-static Bool extend ( ThreadState *tst, Addr addr, SizeT size )
-{
-   ThreadId        tid = tst->tid;
-   NSegment const* stackseg = NULL;
-
-   if (VG_(extend_stack)(addr, tst->client_stack_szB)) {
-      stackseg = VG_(am_find_nsegment)(addr);
-      if (0 && stackseg)
-	 VG_(printf)("frame=%#lx seg=%#lx-%#lx\n",
-		     addr, stackseg->start, stackseg->end);
-   }
-
-   if (stackseg == NULL || !stackseg->hasR || !stackseg->hasW) {
-      VG_(message)(
-         Vg_UserMsg,
-         "Can't extend stack to %#lx during signal delivery for thread %d:\n",
-         addr, tid);
-      if (stackseg == NULL)
-         VG_(message)(Vg_UserMsg, "  no stack segment\n");
-      else
-         VG_(message)(Vg_UserMsg, "  too small or bad protection modes\n");
-
-      /* set SIGSEGV to default handler */
-      VG_(set_default_handler)(VKI_SIGSEGV);
-      VG_(synth_fault_mapping)(tid, addr);
-
-      /* The whole process should be about to die, since the default
-	 action of SIGSEGV to kill the whole process. */
-      return False;
-   }
-
-   /* For tracking memory events, indicate the entire frame has been
-      allocated. */
-   VG_TRACK( new_mem_stack_signal, addr - VG_STACK_REDZONE_SZB,
-             size + VG_STACK_REDZONE_SZB, tid );
-
-   return True;
-}
 
 //.. /* Build the Valgrind-specific part of a signal frame. */
 //.. 
@@ -692,7 +649,7 @@ void VG_(sigframe_create)( ThreadId tid,
 
    tst = VG_(get_ThreadState)(tid);
 
-   if (!extend(tst, sp, sp_top_of_frame - sp))
+   if (! ML_(sf_maybe_extend_stack)(tst, sp, sp_top_of_frame - sp, flags))
       return;
 
    vg_assert(VG_IS_16_ALIGNED(sp));

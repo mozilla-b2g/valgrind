@@ -90,9 +90,11 @@ typedef
       // field names), the s_arg value is the offset from the stack pointer.
       Int o_sysno;
 #     if defined(VGP_x86_linux) || defined(VGP_amd64_linux) \
-         || defined(VGP_ppc32_linux) || defined(VGP_ppc64_linux) \
+         || defined(VGP_ppc32_linux) \
+         || defined(VGP_ppc64be_linux) || defined(VGP_ppc64le_linux) \
          || defined(VGP_arm_linux) || defined(VGP_s390x_linux) \
-         || defined(VGP_mips64_linux) || defined(VGP_arm64_linux)
+         || defined(VGP_mips64_linux) || defined(VGP_arm64_linux) \
+         || defined(VGP_tilegx_linux)
       Int o_arg1;
       Int o_arg2;
       Int o_arg3;
@@ -329,11 +331,13 @@ static inline UWord getRES ( SyscallStatus* st ) {
    return sr_Res(st->sres);
 }
 
+#if defined(VGO_darwin)
 static inline UWord getRESHI ( SyscallStatus* st ) {
    vg_assert(st->what == SsComplete);
    vg_assert(!sr_isError(st->sres));
    return sr_ResHI(st->sres);
 }
+#endif
 
 static inline UWord getERR ( SyscallStatus* st ) {
    vg_assert(st->what == SsComplete);
@@ -367,8 +371,8 @@ static inline UWord getERR ( SyscallStatus* st ) {
    if (VG_(clo_trace_syscalls))                      \
       VG_(printf)(format, ## args)
 
-#define FUSE_COMPATIBLE_MAY_BLOCK()                       \
-   if (VG_(strstr)(VG_(clo_sim_hints),"fuse-compatible")) \
+#define FUSE_COMPATIBLE_MAY_BLOCK()                            \
+   if (SimHintiS(SimHint_fuse_compatible, VG_(clo_sim_hints))) \
       *flags |= SfMayBlock
 
 

@@ -38,28 +38,86 @@
 
 #include "pub_core_basics.h"    // SizeT
 
-/* Allocate(zeroed), free, strdup, memdup, all in VG_AR_DINFO. */
+/* Allocate(zeroed), free, strdup, memdup, shrink, all in VG_AR_DINFO.
+   The allocation functions never return NULL. */
 void*  ML_(dinfo_zalloc)( const HChar* cc, SizeT szB );
 void   ML_(dinfo_free)( void* v );
 HChar* ML_(dinfo_strdup)( const HChar* cc, const HChar* str );
-void*  ML_(dinfo_memdup)( const HChar* cc, void* str, SizeT nStr );
+void*  ML_(dinfo_memdup)( const HChar* cc, const void* str, SizeT nStr );
+void*  ML_(dinfo_realloc) ( const HChar* cc, void* ptr, SizeT new_size );
+void   ML_(dinfo_shrink_block)( void* ptr, SizeT szB );
 
-/* Extract (possibly unaligned) data of various sizes from a buffer. */
-Short ML_(read_Short)( UChar* data );
-Int ML_(read_Int)( UChar* data );
-Long ML_(read_Long)( UChar* data );
-UShort ML_(read_UShort)( UChar* data );
-UWord ML_(read_UWord)( UChar* data );
-UInt ML_(read_UInt)( UChar* data );
-ULong ML_(read_ULong)( UChar* data );
-UChar ML_(read_UChar)( UChar* data );
-Addr ML_(read_Addr)( UChar* data );
+/* Define functions to read/write types of various sizes from/to a
+   (potentially unaligned) UChar *data buffer.
+   Some archs can do efficient unaligned access. For these archs,
+   do the load/store directly. For others, call the UAS (Un Aligned Safe)
+   functions. */
+#if defined(VGA_x86) || defined(VGA_amd64)
 
-UChar* ML_(write_UShort)( UChar* ptr, UShort val );
-UChar* ML_(write_UInt)( UChar* ptr, UInt val );
-UChar* ML_(write_ULong)( UChar* ptr, ULong val );
-UChar* ML_(write_UChar)( UChar* ptr, UChar val );
-UChar* ML_(write_Addr)( UChar* ptr, Addr val );
+#define DEF_READ(type) \
+static inline type VGAPPEND(vgModuleLocal_read_,type) ( const UChar* data ) \
+{ \
+   return (*(const type*)(data)); \
+} \
+type VGAPPEND(vgModuleLocal_readUAS_,type) ( const UChar* data )
+
+#define DEF_WRITE(type) \
+static inline UChar* VGAPPEND(vgModuleLocal_write_,type) ( UChar* ptr, type val ) \
+{ \
+   (*(type*)(ptr)) = val; \
+   return ptr + sizeof(type);   \
+} \
+UChar* VGAPPEND(vgModuleLocal_writeUAS_,type) ( UChar* ptr, type val )
+
+#else
+
+#define DEF_READ(type) \
+type VGAPPEND(vgModuleLocal_readUAS_,type) ( const UChar* data ); \
+static inline type VGAPPEND(vgModuleLocal_read_,type) ( const UChar* data ) \
+{ \
+   return VGAPPEND(vgModuleLocal_readUAS_,type)(data); \
+}
+
+#define DEF_WRITE(type) \
+UChar* VGAPPEND(vgModuleLocal_writeUAS_,type) ( UChar* ptr, type val ); \
+static inline UChar* VGAPPEND(vgModuleLocal_write_,type) ( UChar* ptr, type val ) \
+{ \
+   return VGAPPEND(vgModuleLocal_writeUAS_,type)(ptr,val); \
+}
+
+#endif
+
+/* Defines a bunch of functions such as
+   Short ML_(read_Short)( const UChar* data );
+   Int ML_(read_Int)( const UChar* data );
+   ... */
+DEF_READ(Short);
+DEF_READ(Int);
+DEF_READ(Long);
+DEF_READ(UShort);
+DEF_READ(UWord);
+DEF_READ(UInt);
+DEF_READ(ULong);
+DEF_READ(Addr);
+
+/* Defines a bunch of functions such as
+   UChar* ML_(write_UShort)( UChar* ptr, UShort val );
+   UChar* ML_(write_UInt)( UChar* ptr, UInt val );
+   ... */
+DEF_WRITE(UShort);
+DEF_WRITE(UInt);
+DEF_WRITE(ULong);
+DEF_WRITE(Addr);
+
+static inline UChar ML_(read_UChar)( const UChar* data )
+{
+   return data[0];
+}
+static inline UChar* ML_(write_UChar)( UChar* ptr, UChar val )
+{  
+   ptr[0] = val;
+   return ptr + sizeof(UChar);
+}
 
 /* A handy type, a la Haskell's Maybe type.  Yes, I know, C sucks.
    Been there.  Done that.  Seen the movie.  Got the T-shirt.  Etc. */

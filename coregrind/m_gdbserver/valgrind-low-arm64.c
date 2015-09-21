@@ -26,7 +26,6 @@
 #include "regdef.h"
 #include "regcache.h"
 
-#include "pub_core_aspacemgr.h"
 #include "pub_core_machine.h"
 #include "pub_core_threadstate.h"
 #include "pub_core_transtab.h"
@@ -183,7 +182,7 @@ void transfer_register (ThreadId tid, int abs_regno, void * buf,
    case 30: VG_(transfer) (&arm->guest_X30,  buf, dir, size, mod); break;
    case 31: VG_(transfer) (&arm->guest_XSP,  buf, dir, size, mod); break;
    case 32: VG_(transfer) (&arm->guest_PC,   buf, dir, size, mod); break;
-   case 33: *mod = False; // GDBTD cpsr what to do for arm64 ???
+   case 33: *mod = False; break; // GDBTD cpsr what to do for arm64 ???
 
    case 34: VG_(transfer) (&arm->guest_Q0,  buf, dir, size, mod); break;
    case 35: VG_(transfer) (&arm->guest_Q1,  buf, dir, size, mod); break;
@@ -217,7 +216,31 @@ void transfer_register (ThreadId tid, int abs_regno, void * buf,
    case 63: VG_(transfer) (&arm->guest_Q29, buf, dir, size, mod); break;
    case 64: VG_(transfer) (&arm->guest_Q30, buf, dir, size, mod); break;
    case 65: VG_(transfer) (&arm->guest_Q31, buf, dir, size, mod); break;
-   case 66: VG_(transfer) (&arm->guest_FPSR, buf, dir, size, mod); break;
+   case 66: {
+      /* The VEX ARM64 FPSR representation is not the same as the
+          architecturally defined representation.  Hence use conversion
+          functions to convert to/from it.
+          VEX FPSR only models QC (bit 27), and uses a 64 bits to store
+          this FPSR QC bit. So, we need to transfer from/to the lowest
+          significant part of the ULong that VEX provides/needs,
+          as GDB expects or gives only 4 bytes. */
+      if (dir == valgrind_to_gdbserver) {
+         ULong fpsr64 = LibVEX_GuestARM64_get_fpsr(arm);
+         UInt fpsr = (UInt)fpsr64;
+         VG_(transfer) (&fpsr, buf, dir, size, mod);
+      } else {
+         UInt fpsr;
+         ULong fpsr64;
+         VG_(transfer) ((UInt*)&fpsr, buf, dir, size, mod);
+         fpsr64 = fpsr;
+         LibVEX_GuestARM64_set_fpsr(arm, fpsr64);
+         /* resync the cache with the part of fpsr that VEX represents. */
+         fpsr64 = LibVEX_GuestARM64_get_fpsr(arm);
+         fpsr = (UInt)fpsr64;
+         VG_(transfer) (&fpsr, buf, valgrind_to_gdbserver, size, mod);
+      }
+      break;
+   }
    case 67: VG_(transfer) (&arm->guest_FPCR, buf, dir, size, mod); break;
    default: vg_assert(0);
    }
@@ -237,6 +260,13 @@ const char* target_xml (Bool shadow_mode)
 #endif 
 }
 
+static CORE_ADDR** target_get_dtv (ThreadState *tst)
+{
+   VexGuestARM64State* arm64 = (VexGuestARM64State*)&tst->arch.vex;
+   // arm64 dtv is pointed to by TPIDR_EL0.
+   return (CORE_ADDR**)((CORE_ADDR)arm64->guest_TPIDR_EL0);
+}
+
 static struct valgrind_target_ops low_target = {
    num_regs,
    regs,
@@ -245,7 +275,8 @@ static struct valgrind_target_ops low_target = {
    get_pc,
    set_pc,
    "arm64",
-   target_xml
+   target_xml,
+   target_get_dtv
 };
 
 void arm64_init_architecture (struct valgrind_target_ops *target)

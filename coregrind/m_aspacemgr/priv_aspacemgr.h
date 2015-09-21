@@ -47,6 +47,8 @@
                                  // VG_IS_PAGE_ALIGNED
                                  // VG_PGROUNDDN, VG_PGROUNDUP
 
+#include "pub_core_libcassert.h" // VG_(exit_now)
+
 #include "pub_core_syscall.h"    // VG_(do_syscallN)
                                  // VG_(mk_SysRes_Error)
                                  // VG_(mk_SysRes_Success)
@@ -65,7 +67,9 @@
 
 __attribute__ ((noreturn))
 extern void   ML_(am_exit) ( Int status );
+__attribute__ ((noreturn))
 extern void   ML_(am_barf) ( const HChar* what );
+__attribute__ ((noreturn))
 extern void   ML_(am_barf_toolow) ( const HChar* what );
 
 __attribute__ ((noreturn))
@@ -75,7 +79,7 @@ extern void   ML_(am_assert_fail) ( const HChar* expr,
                                     const HChar* fn );
 
 #define aspacem_assert(expr)                              \
-  ((void) ((expr) ? 0 :                                   \
+  ((void) (LIKELY(expr) ? 0 :                             \
            (ML_(am_assert_fail)(#expr,                    \
                                 __FILE__, __LINE__,       \
                                 __PRETTY_FUNCTION__))))
@@ -108,7 +112,7 @@ extern SysRes ML_(am_do_relocate_nooverlap_mapping_NO_NOTIFY)(
 extern SysRes ML_(am_open)  ( const HChar* pathname, Int flags, Int mode );
 extern void   ML_(am_close) ( Int fd );
 extern Int    ML_(am_read)  ( Int fd, void* buf, Int count);
-extern Int    ML_(am_readlink) ( HChar* path, HChar* buf, UInt bufsiz );
+extern Int    ML_(am_readlink) ( const HChar* path, HChar* buf, UInt bufsiz );
 extern Int    ML_(am_fcntl) ( Int fd, Int cmd, Addr arg );
 
 /* Get the dev, inode and mode info for a file descriptor, if
@@ -126,6 +130,29 @@ Bool ML_(am_resolve_filename) ( Int fd, /*OUT*/HChar* buf, Int nbuf );
 /* Do a sanity check (/proc/self/maps sync check) */
 extern void ML_(am_do_sanity_check)( void );
 
+
+/* ------ Implemented in aspacemgr-segnames.c ------ */
+void ML_(am_segnames_init)(void);
+void ML_(am_show_segnames)(Int logLevel, const HChar *prefix);
+
+/* Put NAME into the string table of segment names. Return index for
+   future reference. A return value of -1 indicates that the segment name
+   could not be stored. Basically an out-of-memory situation. */
+Int ML_(am_allocate_segname)(const HChar *name);
+
+/* Increment / decrement the reference counter for this segment name. */
+void ML_(am_inc_refcount)(Int);
+void ML_(am_dec_refcount)(Int);
+
+/* Check whether the segname index is sane. */
+Bool ML_(am_sane_segname)(Int fnIdx);
+
+/* Return the segment name for the given index. Maybe return NULL, if the
+   segment does not have a name. */
+const HChar *ML_(am_get_segname)(Int fnIdx);
+
+/* Return the sequence number of the segment name */
+Int ML_(am_segname_get_seqnr)(Int fnIdx);
 
 #endif   // __PRIV_ASPACEMGR_H
 

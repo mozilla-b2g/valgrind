@@ -31,6 +31,7 @@
 
 #include "pub_core_basics.h"
 #include "pub_core_tooliface.h"
+#include "pub_core_transtab.h"     /* VG_(ok_to_discard_translations) */
 
 // The core/tool dictionary of functions (initially zeroed, as we want it)
 VgToolInterface VG_(tdict);
@@ -41,8 +42,8 @@ VgToolInterface VG_(tdict);
 void VG_(basic_tool_funcs)(
    void(*post_clo_init)(void),
    IRSB*(*instrument)(VgCallbackClosure*, IRSB*, 
-                      VexGuestLayout*, VexGuestExtents*, VexArchInfo*,
-                      IRType, IRType),
+                      const VexGuestLayout*, const VexGuestExtents*,
+                      const VexArchInfo*, IRType, IRType),
    void(*fini)(Int)
 )
 {
@@ -93,6 +94,7 @@ VgNeeds VG_(needs) = {
    .syscall_wrapper      = False,
    .sanity_checks        = False,
    .print_stats          = False,
+   .info_location        = False,
    .var_info	         = False,
    .malloc_replacement   = False,
    .xml_output           = False,
@@ -218,7 +220,7 @@ NEEDS(core_errors)
 NEEDS(var_info)
 
 void VG_(needs_superblock_discards)(
-   void (*discard)(Addr64, VexGuestExtents)
+   void (*discard)(Addr, VexGuestExtents)
 )
 {
    VG_(needs).superblock_discards = True;
@@ -226,18 +228,18 @@ void VG_(needs_superblock_discards)(
 }
 
 void VG_(needs_tool_errors)(
-   Bool (*eq)         (VgRes, Error*, Error*),
-   void (*before_pp)  (Error*),
-   void (*pp)         (Error*),
+   Bool (*eq)         (VgRes, const Error*, const Error*),
+   void (*before_pp)  (const Error*),
+   void (*pp)         (const Error*),
    Bool show_TIDs,
-   UInt (*update)     (Error*),
+   UInt (*update)     (const Error*),
    Bool (*recog)      (const HChar*, Supp*),
    Bool (*read_extra) (Int, HChar**, SizeT*, Int*, Supp*),
-   Bool (*matches)    (Error*, Supp*),
-   const HChar* (*name) (Error*),
-   Bool (*get_xtra_si)(Error*,/*OUT*/HChar*,Int),
-   Bool (*print_xtra_su)(Supp*,/*OUT*/HChar*,Int),
-   void (*update_xtra_su)(Error*, Supp*)
+   Bool (*matches)    (const Error*, const Supp*),
+   const HChar* (*name) (const Error*),
+   SizeT (*get_xtra_si)(const Error*,/*OUT*/HChar*,Int),
+   SizeT (*print_xtra_su)(const Supp*,/*OUT*/HChar*,Int),
+   void (*update_xtra_su)(const Error*, const Supp*)
 )
 {
    VG_(needs).tool_errors = True;
@@ -267,12 +269,27 @@ void VG_(needs_command_line_options)(
    VG_(tdict).tool_print_debug_usage       = debug_usage;
 }
 
+/* The tool's function for handling client requests. */
+static Bool (*tool_handle_client_request_func)(ThreadId, UWord *, UWord *);
+
+static Bool wrap_tool_handle_client_request(ThreadId tid, UWord *arg1,
+                                            UWord *arg2)
+{
+   Bool ret;
+   VG_(ok_to_discard_translations) = True;
+   ret = tool_handle_client_request_func(tid, arg1, arg2);
+   VG_(ok_to_discard_translations) = False;
+   return ret;
+}
+
 void VG_(needs_client_requests)(
    Bool (*handle)(ThreadId, UWord*, UWord*)
 )
 {
    VG_(needs).client_requests = True;
-   VG_(tdict).tool_handle_client_request = handle;
+   tool_handle_client_request_func = handle;   /* Stash away */
+   /* Register the wrapper function */
+   VG_(tdict).tool_handle_client_request = wrap_tool_handle_client_request;
 }
 
 void VG_(needs_syscall_wrapper)(
@@ -301,6 +318,14 @@ void VG_(needs_print_stats) (
 {
    VG_(needs).print_stats = True;
    VG_(tdict).tool_print_stats = print_stats;
+}
+
+void VG_(needs_info_location) (
+   void (*info_location)(Addr)
+)
+{
+   VG_(needs).info_location = True;
+   VG_(tdict).tool_info_location = info_location;
 }
 
 void VG_(needs_malloc_replacement)(

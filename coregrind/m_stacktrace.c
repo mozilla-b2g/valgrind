@@ -30,7 +30,6 @@
 
 #include "pub_core_basics.h"
 #include "pub_core_vki.h"
-#include "pub_core_libcsetjmp.h"    // to keep _threadstate.h happy
 #include "pub_core_threadstate.h"
 #include "pub_core_debuginfo.h"     // XXX: circular dependency
 #include "pub_core_aspacemgr.h"     // For VG_(is_addressable)()
@@ -76,7 +75,20 @@
    }                                                            \
 }
 
-
+/* Note about calculation of fp_min : fp_min is the lowest address
+   which can be accessed during unwinding. This is SP - VG_STACK_REDZONE_SZB.
+   On most platforms, this will be equal to SP (as VG_STACK_REDZONE_SZB
+   is 0). However, on some platforms (e.g. amd64), there is an accessible
+   redzone below the SP. Some CFI unwind info are generated, taking this
+   into account. As an example, the following is a CFI unwind info on
+   amd64 found for a 'retq' instruction:
+[0x400f7e .. 0x400f7e]: let cfa=oldSP+8 in RA=*(cfa+-8) SP=cfa+0 BP=*(cfa+-16)
+  0x400f7e: retq
+  As you can see, the previous BP is found 16 bytes below the cfa, which
+  is the oldSP+8. So, effectively, the BP is found 8 bytes below the SP.
+  The fp_min must take this into account, otherwise, VG_(use_CF_info) will
+  not unwind the BP. */
+   
 /* ------------------------ x86 ------------------------- */
 
 #if defined(VGP_x86_linux) || defined(VGP_x86_darwin)
@@ -130,16 +142,21 @@ static Addr fp_CF_verif_cache [N_FP_CF_VERIF];
    then they will not land in the same cache bucket.
 */
 
+/* cached result of VG_(FPO_info_present)(). Refreshed each time
+   the fp_CF_verif_generation is different of the current debuginfo
+   generation. */
+static Bool FPO_info_present = False;
+
 static UInt fp_CF_verif_generation = 0;
 // Our cache has to be maintained in sync with the CFI cache.
-// Each time the CFI cache is changed, its generation will be incremented.
+// Each time the debuginfo is changed, its generation will be incremented.
 // We will clear our cache when our saved generation differs from
-// the CFI cache generation.
+// the debuginfo generation.
 
 UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
                                /*OUT*/Addr* ips, UInt max_n_ips,
                                /*OUT*/Addr* sps, /*OUT*/Addr* fps,
-                               UnwindStartRegs* startRegs,
+                               const UnwindStartRegs* startRegs,
                                Addr fp_max_orig )
 {
    const Bool do_stats = False; // compute and output some stats regularly.
@@ -192,7 +209,7 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
    uregs.xip = (Addr)startRegs->r_pc;
    uregs.xsp = (Addr)startRegs->r_sp;
    uregs.xbp = startRegs->misc.X86.r_ebp;
-   Addr fp_min = uregs.xsp;
+   Addr fp_min = uregs.xsp - VG_STACK_REDZONE_SZB;
 
    /* Snaffle IPs from the client's stack into ips[0 .. max_n_ips-1],
       stopping when the trail goes cold, which we guess to be
@@ -206,8 +223,8 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
       fp_max -= sizeof(Addr);
 
    if (debug)
-      VG_(printf)("max_n_ips=%d fp_min=0x%lx fp_max_orig=0x%lx, "
-                  "fp_max=0x%lx ip=0x%lx fp=0x%lx\n",
+      VG_(printf)("max_n_ips=%d fp_min=0x%08lx fp_max_orig=0x08%lx, "
+                  "fp_max=0x%08lx ip=0x%08lx fp=0x%08lx\n",
                   max_n_ips, fp_min, fp_max_orig, fp_max,
                   uregs.xip, uregs.xbp);
 
@@ -227,9 +244,10 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
    } 
 #  endif
 
-   if (UNLIKELY (fp_CF_verif_generation != VG_(CF_info_generation)())) {
-      fp_CF_verif_generation = VG_(CF_info_generation)();
+   if (UNLIKELY (fp_CF_verif_generation != VG_(debuginfo_generation)())) {
+      fp_CF_verif_generation = VG_(debuginfo_generation)();
       VG_(memset)(&fp_CF_verif_cache, 0, sizeof(fp_CF_verif_cache));
+      FPO_info_present = VG_(FPO_info_present)();
    }
 
 
@@ -262,8 +280,10 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
       UWord hash = uregs.xip % N_FP_CF_VERIF;
       Addr xip_verif = uregs.xip ^ fp_CF_verif_cache [hash];
       if (debug)
-         VG_(printf)("     uregs.xip 0x%08lx xip_verif[0x%08lx]\n",
-                     uregs.xip, xip_verif);
+         VG_(printf)("     uregs.xip 0x%08lx xip_verif[0x%08lx]"
+                     " xbp 0x%08lx xsp 0x%08lx\n",
+                     uregs.xip, xip_verif,
+                     uregs.xbp, uregs.xsp);
       // If xip is in cache, then xip_verif will be <= CFUNWIND.
       // Otherwise, if not in cache, xip_verif will be > CFUNWIND.
 
@@ -397,8 +417,9 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
       }
 
       /* And, similarly, try for MSVC FPO unwind info. */
-      if ( VG_(use_FPO_info)( &uregs.xip, &uregs.xsp, &uregs.xbp,
-                              fp_min, fp_max ) ) {
+      if (FPO_info_present
+          && VG_(use_FPO_info)( &uregs.xip, &uregs.xsp, &uregs.xbp,
+                                fp_min, fp_max ) ) {
          if (debug) unwind_case = "MS";
          if (do_stats) stats.MS++;
          goto unwind_done;
@@ -455,10 +476,10 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
 UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
                                /*OUT*/Addr* ips, UInt max_n_ips,
                                /*OUT*/Addr* sps, /*OUT*/Addr* fps,
-                               UnwindStartRegs* startRegs,
+                               const UnwindStartRegs* startRegs,
                                Addr fp_max_orig )
 {
-   Bool  debug = False;
+   const Bool  debug = False;
    Int   i;
    Addr  fp_max;
    UInt  n_found = 0;
@@ -471,7 +492,7 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
    uregs.xip = startRegs->r_pc;
    uregs.xsp = startRegs->r_sp;
    uregs.xbp = startRegs->misc.AMD64.r_rbp;
-   Addr fp_min = uregs.xsp;
+   Addr fp_min = uregs.xsp - VG_STACK_REDZONE_SZB;
 
    /* Snaffle IPs from the client's stack into ips[0 .. max_n_ips-1],
       stopping when the trail goes cold, which we guess to be
@@ -512,7 +533,27 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
    if (sps) sps[0] = uregs.xsp;
    if (fps) fps[0] = uregs.xbp;
    i = 1;
+   if (debug)
+      VG_(printf)("     ipsS[%d]=%#08lx rbp %#08lx rsp %#08lx\n",
+                  i-1, ips[i-1], uregs.xbp, uregs.xsp);
 
+#  if defined(VGO_darwin)
+   if (VG_(is_valid_tid)(tid_if_known) &&
+      VG_(is_in_syscall)(tid_if_known) &&
+      i < max_n_ips) {
+      /* On Darwin, all the system call stubs have no function
+       * prolog.  So instead of top of the stack being a new
+       * frame comprising a saved BP and a return address, we
+       * just have the return address in the caller's frame.
+       * Adjust for this by recording the return address.
+       */
+      ips[i] = *(Addr *)uregs.xsp - 1;
+      if (sps) sps[i] = uregs.xsp;
+      if (fps) fps[i] = uregs.xbp;
+      i++;
+   }
+#  endif
+       
    /* Loop unwinding the stack. Note that the IP value we get on
     * each pass (whether from CFI info or a stack frame) is a
     * return address so is actually after the calling instruction
@@ -543,7 +584,8 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
          if (fps) fps[i] = uregs.xbp;
          ips[i++] = uregs.xip - 1; /* -1: refer to calling insn, not the RA */
          if (debug)
-            VG_(printf)("     ipsC[%d]=%#08lx\n", i-1, ips[i-1]);
+            VG_(printf)("     ipsC[%d]=%#08lx rbp %#08lx rsp %#08lx\n",
+                        i-1, ips[i-1], uregs.xbp, uregs.xsp);
          uregs.xip = uregs.xip - 1; /* as per comment at the head of this loop */
          if (UNLIKELY(cmrf > 0)) {RECURSIVE_MERGE(cmrf,ips,i);};
          continue;
@@ -572,7 +614,8 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
          if (fps) fps[i] = uregs.xbp;
          ips[i++] = uregs.xip - 1; /* -1: refer to calling insn, not the RA */
          if (debug)
-            VG_(printf)("     ipsF[%d]=%#08lx\n", i-1, ips[i-1]);
+            VG_(printf)("     ipsF[%d]=%#08lx rbp %#08lx rsp %#08lx\n",
+                        i-1, ips[i-1], uregs.xbp, uregs.xsp);
          uregs.xip = uregs.xip - 1; /* as per comment at the head of this loop */
          if (UNLIKELY(cmrf > 0)) {RECURSIVE_MERGE(cmrf,ips,i);};
          continue;
@@ -620,16 +663,17 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
 
 /* -----------------------ppc32/64 ---------------------- */
 
-#if defined(VGP_ppc32_linux) || defined(VGP_ppc64_linux)
+#if defined(VGP_ppc32_linux) || defined(VGP_ppc64be_linux) \
+    || defined(VGP_ppc64le_linux)
 
 UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
                                /*OUT*/Addr* ips, UInt max_n_ips,
                                /*OUT*/Addr* sps, /*OUT*/Addr* fps,
-                               UnwindStartRegs* startRegs,
+                               const UnwindStartRegs* startRegs,
                                Addr fp_max_orig )
 {
    Bool  lr_is_first_RA = False;
-#  if defined(VG_PLAT_USES_PPCTOC)
+#  if defined(VG_PLAT_USES_PPCTOC) || defined(VGP_ppc64le_linux)
    Word redir_stack_size = 0;
    Word redirs_used      = 0;
 #  endif
@@ -648,10 +692,10 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
    Addr fp = sp;
 #  if defined(VGP_ppc32_linux)
    Addr lr = startRegs->misc.PPC32.r_lr;
-#  elif defined(VGP_ppc64_linux)
+#  elif defined(VGP_ppc64be_linux) || defined(VGP_ppc64le_linux)
    Addr lr = startRegs->misc.PPC64.r_lr;
 #  endif
-   Addr fp_min = sp;
+   Addr fp_min = sp - VG_STACK_REDZONE_SZB;
 
    /* Snaffle IPs from the client's stack into ips[0 .. max_n_ips-1],
       stopping when the trail goes cold, which we guess to be
@@ -684,16 +728,16 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
    /* fp is %r1.  ip is %cia.  Note, ppc uses r1 as both the stack and
       frame pointers. */
 
-#  if defined(VGP_ppc64_linux)
+#  if defined(VGP_ppc64be_linux) || defined(VGP_ppc64le_linux)
    redir_stack_size = VEX_GUEST_PPC64_REDIR_STACK_SIZE;
    redirs_used      = 0;
 #  endif
 
-#  if defined(VG_PLAT_USES_PPCTOC)
+#  if defined(VG_PLAT_USES_PPCTOC) || defined (VGP_ppc64le_linux)
    /* Deal with bogus LR values caused by function
       interception/wrapping on ppc-TOC platforms; see comment on
       similar code a few lines further down. */
-   if (ULong_to_Ptr(lr) == (void*)&VG_(ppctoc_magic_redirect_return_stub)
+   if (lr == (Addr)&VG_(ppctoc_magic_redirect_return_stub)
        && VG_(is_valid_tid)(tid_if_known)) {
       Word hsp = VG_(threads)[tid_if_known].arch.vex.guest_REDIR_SP;
       redirs_used++;
@@ -714,15 +758,16 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
       frame. */
    lr_is_first_RA = False;
    {
-#     define M_VG_ERRTXT 1000
-      HChar buf_lr[M_VG_ERRTXT], buf_ip[M_VG_ERRTXT];
+      const HChar *buf_lr, *buf_ip;
       /* The following conditional looks grossly inefficient and
          surely could be majorly improved, with not much effort. */
-      if (VG_(get_fnname_raw) (lr, buf_lr, M_VG_ERRTXT))
-         if (VG_(get_fnname_raw) (ip, buf_ip, M_VG_ERRTXT))
-            if (VG_(strncmp)(buf_lr, buf_ip, M_VG_ERRTXT))
+      if (VG_(get_fnname_raw) (lr, &buf_lr)) {
+         HChar buf_lr_copy[VG_(strlen)(buf_lr) + 1];
+         VG_(strcpy)(buf_lr_copy, buf_lr);
+         if (VG_(get_fnname_raw) (ip, &buf_ip))
+            if (VG_(strcmp)(buf_lr_copy, buf_ip))
                lr_is_first_RA = True;
-#     undef M_VG_ERRTXT
+      }
    }
 
    if (sps) sps[0] = fp; /* NB. not sp */
@@ -740,7 +785,7 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
         /* On ppc64-linux (ppc64-elf, really), the lr save
            slot is 2 words back from sp, whereas on ppc32-elf(?) it's
            only one word back. */
-#        if defined(VG_PLAT_USES_PPCTOC)
+#        if defined(VG_PLAT_USES_PPCTOC) || defined(VGP_ppc64le_linux)
          const Int lr_offset = 2;
 #        else
          const Int lr_offset = 1;
@@ -759,7 +804,7 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
             else
                ip = (((UWord*)fp)[lr_offset]);
 
-#           if defined(VG_PLAT_USES_PPCTOC)
+#           if defined(VG_PLAT_USES_PPCTOC) || defined(VGP_ppc64le_linux)
             /* Nasty hack to do with function replacement/wrapping on
                ppc64-linux.  If LR points to our magic return stub,
                then we are in a wrapped or intercepted function, in
@@ -813,15 +858,16 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
 
 static Bool in_same_fn ( Addr a1, Addr a2 )
 {
-#  define M_VG_ERRTXT 500
-   HChar buf_a1[M_VG_ERRTXT], buf_a2[M_VG_ERRTXT];
+   const HChar *buf_a1, *buf_a2;
    /* The following conditional looks grossly inefficient and
       surely could be majorly improved, with not much effort. */
-   if (VG_(get_fnname_raw) (a1, buf_a1, M_VG_ERRTXT))
-      if (VG_(get_fnname_raw) (a2, buf_a2, M_VG_ERRTXT))
-         if (VG_(strncmp)(buf_a1, buf_a2, M_VG_ERRTXT))
+   if (VG_(get_fnname_raw) (a1, &buf_a1)) {
+      HChar buf_a1_copy[VG_(strlen)(buf_a1) + 1];
+      VG_(strcpy)(buf_a1_copy, buf_a1);
+      if (VG_(get_fnname_raw) (a2, &buf_a2))
+         if (VG_(strcmp)(buf_a1_copy, buf_a2))
             return True;
-#  undef M_VG_ERRTXT
+   }
    return False;
 }
 
@@ -895,7 +941,7 @@ static Bool looks_like_RA ( Addr ra )
 UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
                                /*OUT*/Addr* ips, UInt max_n_ips,
                                /*OUT*/Addr* sps, /*OUT*/Addr* fps,
-                               UnwindStartRegs* startRegs,
+                               const UnwindStartRegs* startRegs,
                                Addr fp_max_orig )
 {
    Bool  debug = False;
@@ -914,7 +960,7 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
    uregs.r12 = startRegs->misc.ARM.r12;
    uregs.r11 = startRegs->misc.ARM.r11;
    uregs.r7  = startRegs->misc.ARM.r7;
-   Addr fp_min = uregs.r13;
+   Addr fp_min = uregs.r13 - VG_STACK_REDZONE_SZB;
 
    /* Snaffle IPs from the client's stack into ips[0 .. max_n_ips-1],
       stopping when the trail goes cold, which we guess to be
@@ -1041,7 +1087,7 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
 UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
                                /*OUT*/Addr* ips, UInt max_n_ips,
                                /*OUT*/Addr* sps, /*OUT*/Addr* fps,
-                               UnwindStartRegs* startRegs,
+                               const UnwindStartRegs* startRegs,
                                Addr fp_max_orig )
 {
    Bool  debug = False;
@@ -1058,7 +1104,7 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
    uregs.sp = startRegs->r_sp;
    uregs.x30 = startRegs->misc.ARM64.x30;
    uregs.x29 = startRegs->misc.ARM64.x29;
-   Addr fp_min = uregs.sp;
+   Addr fp_min = uregs.sp - VG_STACK_REDZONE_SZB;
 
    /* Snaffle IPs from the client's stack into ips[0 .. max_n_ips-1],
       stopping when the trail goes cold, which we guess to be
@@ -1137,7 +1183,7 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
 UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
                                /*OUT*/Addr* ips, UInt max_n_ips,
                                /*OUT*/Addr* sps, /*OUT*/Addr* fps,
-                               UnwindStartRegs* startRegs,
+                               const UnwindStartRegs* startRegs,
                                Addr fp_max_orig )
 {
    Bool  debug = False;
@@ -1152,7 +1198,7 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
    D3UnwindRegs uregs;
    uregs.ia = startRegs->r_pc;
    uregs.sp = startRegs->r_sp;
-   Addr fp_min = uregs.sp;
+   Addr fp_min = uregs.sp - VG_STACK_REDZONE_SZB;
    uregs.fp = startRegs->misc.S390X.r_fp;
    uregs.lr = startRegs->misc.S390X.r_lr;
 
@@ -1220,7 +1266,7 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
 UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
                                /*OUT*/Addr* ips, UInt max_n_ips,
                                /*OUT*/Addr* sps, /*OUT*/Addr* fps,
-                               UnwindStartRegs* startRegs,
+                               const UnwindStartRegs* startRegs,
                                Addr fp_max_orig )
 {
    Bool  debug = False;
@@ -1235,7 +1281,7 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
    D3UnwindRegs uregs;
    uregs.pc = startRegs->r_pc;
    uregs.sp = startRegs->r_sp;
-   Addr fp_min = uregs.sp;
+   Addr fp_min = uregs.sp - VG_STACK_REDZONE_SZB;
 
 #if defined(VGP_mips32_linux)
    uregs.fp = startRegs->misc.MIPS32.r30;
@@ -1370,6 +1416,213 @@ UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
 
 #endif
 
+/* ------------------------ tilegx ------------------------- */
+#if defined(VGP_tilegx_linux)
+UInt VG_(get_StackTrace_wrk) ( ThreadId tid_if_known,
+                               /*OUT*/Addr* ips, UInt max_n_ips,
+                               /*OUT*/Addr* sps, /*OUT*/Addr* fps,
+                               const UnwindStartRegs* startRegs,
+                               Addr fp_max_orig )
+{
+   Bool  debug = False;
+   Int   i;
+   Addr  fp_max;
+   UInt  n_found = 0;
+   const Int cmrf = VG_(clo_merge_recursive_frames);
+
+   vg_assert(sizeof(Addr) == sizeof(UWord));
+   vg_assert(sizeof(Addr) == sizeof(void*));
+
+   D3UnwindRegs uregs;
+   uregs.pc = startRegs->r_pc;
+   uregs.sp = startRegs->r_sp;
+   Addr fp_min = uregs.sp - VG_STACK_REDZONE_SZB;
+
+   uregs.fp = startRegs->misc.TILEGX.r52;
+   uregs.lr = startRegs->misc.TILEGX.r55;
+
+   fp_max = VG_PGROUNDUP(fp_max_orig);
+   if (fp_max >= sizeof(Addr))
+      fp_max -= sizeof(Addr);
+
+   if (debug)
+      VG_(printf)("max_n_ips=%d fp_min=0x%lx fp_max_orig=0x%lx, "
+                  "fp_max=0x%lx pc=0x%lx sp=0x%lx fp=0x%lx\n",
+                  max_n_ips, fp_min, fp_max_orig, fp_max,
+                  uregs.pc, uregs.sp, uregs.fp);
+
+   if (sps) sps[0] = uregs.sp;
+   if (fps) fps[0] = uregs.fp;
+   ips[0] = uregs.pc;
+   i = 1;
+
+   /* Loop unwinding the stack. */
+   while (True) {
+      if (debug) {
+         VG_(printf)("i: %d, pc: 0x%lx, sp: 0x%lx, lr: 0x%lx\n",
+                     i, uregs.pc, uregs.sp, uregs.lr);
+     }
+     if (i >= max_n_ips)
+        break;
+
+     D3UnwindRegs uregs_copy = uregs;
+     if (VG_(use_CF_info)( &uregs, fp_min, fp_max )) {
+        if (debug)
+           VG_(printf)("USING CFI: pc: 0x%lx, sp: 0x%lx, fp: 0x%lx, lr: 0x%lx\n",
+                       uregs.pc, uregs.sp, uregs.fp, uregs.lr);
+        if (0 != uregs.pc && 1 != uregs.pc &&
+            (uregs.pc < fp_min || uregs.pc > fp_max)) {
+           if (sps) sps[i] = uregs.sp;
+           if (fps) fps[i] = uregs.fp;
+           if (uregs.pc != uregs_copy.pc && uregs.sp != uregs_copy.sp)
+              ips[i++] = uregs.pc - 8;
+           uregs.pc = uregs.pc - 8;
+           if (UNLIKELY(cmrf > 0)) { RECURSIVE_MERGE(cmrf,ips,i); };
+           continue;
+        } else
+           uregs = uregs_copy;
+     }
+
+     Long frame_offset = 0;
+     PtrdiffT offset;
+     if (VG_(get_inst_offset_in_function)(uregs.pc, &offset)) {
+        Addr start_pc = uregs.pc;
+        Addr limit_pc = uregs.pc - offset;
+        Addr cur_pc;
+        /* Try to find any stack adjustment from current instruction
+           bundles downward. */
+        for (cur_pc = start_pc; cur_pc > limit_pc; cur_pc -= 8) {
+           ULong inst;
+           Long off = 0;
+           ULong* cur_inst;
+           /* Fetch the instruction.   */
+           cur_inst = (ULong *)cur_pc;
+           inst = *cur_inst;
+           if(debug)
+              VG_(printf)("cur_pc: 0x%lx, inst: 0x%lx\n", cur_pc, inst);
+
+           if ((inst & 0xC000000000000000ULL) == 0) {
+              /* Bundle is X type. */
+             if ((inst & 0xC000000070000fffULL) ==
+                 (0x0000000010000db6ULL)) {
+                /* addli at X0 */
+                off = (short)(0xFFFF & (inst >> 12));
+             } else if ((inst & 0xF80007ff80000000ULL) ==
+                        (0x000006db00000000ULL)) {
+                /* addli at X1 addli*/
+                off = (short)(0xFFFF & (inst >> 43));
+             } else if ((inst & 0xC00000007FF00FFFULL) ==
+                        (0x0000000040100db6ULL)) {
+                /* addi at X0 */
+                off = (char)(0xFF & (inst >> 12));
+             } else if ((inst & 0xFFF807ff80000000ULL) ==
+                        (0x180806db00000000ULL)) {
+                /* addi at X1 */
+                off = (char)(0xFF & (inst >> 43));
+             }
+           } else {
+              /* Bundle is Y type. */
+              if ((inst & 0x0000000078000FFFULL) ==
+                  (0x0000000000000db6ULL)) {
+                 /* addi at Y0 */
+                 off = (char)(0xFF & (inst >> 12));
+              } else if ((inst & 0x3C0007FF80000000ULL) ==
+                         (0x040006db00000000ULL)) {
+                 /* addi at Y1 */
+                 off = (char)(0xFF & (inst >> 43));
+              }
+           }
+
+           if(debug && off)
+              VG_(printf)("offset: -0x%lx\n", -off);
+
+           if (off < 0) {
+              /* frame offset should be modular of 8 */
+              vg_assert((off & 7) == 0);
+              frame_offset += off;
+           } else if (off > 0)
+              /* Exit loop if a positive stack adjustment is found, which
+                 usually means that the stack cleanup code in the function
+                 epilogue is reached.  */
+             break;
+        }
+     }
+
+     if (frame_offset < 0) {
+        if (0 == uregs.pc || 1 == uregs.pc) break;
+
+        /* Subtract the offset from the current stack. */
+        uregs.sp = uregs.sp + (ULong)(-frame_offset);
+
+        if (debug)
+           VG_(printf)("offset: i: %d, pc: 0x%lx, sp: 0x%lx, lr: 0x%lx\n",
+                       i, uregs.pc, uregs.sp, uregs.lr);
+
+        if (uregs.pc == uregs.lr - 8 ||
+            uregs.lr - 8 >= fp_min && uregs.lr - 8 <= fp_max) {
+           if (debug)
+              VG_(printf)("new lr = 0x%lx\n", *(ULong*)uregs.sp);
+           uregs.lr = *(ULong*)uregs.sp;
+        }
+
+        uregs.pc = uregs.lr - 8;
+
+        if (uregs.lr != 0) {
+           /* Avoid the invalid pc = 0xffff...ff8 */
+           if (sps)
+              sps[i] = uregs.sp;
+
+           if (fps)
+              fps[i] = fps[0];
+
+           ips[i++] = uregs.pc;
+
+           if (UNLIKELY(cmrf > 0)) { RECURSIVE_MERGE(cmrf,ips,i); };
+        }
+        continue;
+     }
+
+     /* A special case for the 1st frame. Assume it was a bad jump.
+        Use the link register "lr" and current stack and frame to
+        try again. */
+     if (i == 1) {
+        if (sps) {
+           sps[1] = sps[0];
+           uregs.sp = sps[0];
+        }
+        if (fps) {
+           fps[1] = fps[0];
+           uregs.fp = fps[0];
+        }
+        if (0 == uregs.lr || 1 == uregs.lr)
+           break;
+
+        uregs.pc = uregs.lr - 8;
+        ips[i++] = uregs.lr - 8;
+        if (UNLIKELY(cmrf > 0)) { RECURSIVE_MERGE(cmrf,ips,i); };
+        continue;
+     }
+     /* No luck.  We have to give up. */
+     break;
+   }
+
+   if (debug) {
+      /* Display the back trace. */
+      Int ii ;
+      for ( ii = 0; ii < i; ii++) {
+         if (sps) {
+            VG_(printf)("%d: pc=%lx  ", ii, ips[ii]);
+            VG_(printf)("sp=%lx\n", sps[ii]);
+         } else {
+            VG_(printf)("%d: pc=%lx\n", ii, ips[ii]);
+         }
+      }
+   }
+
+   n_found = i;
+   return n_found;
+}
+#endif
 
 /*------------------------------------------------------------*/
 /*---                                                      ---*/
@@ -1392,8 +1645,8 @@ UInt VG_(get_StackTrace) ( ThreadId tid,
    VG_(memset)( &startRegs, 0, sizeof(startRegs) );
    VG_(get_UnwindStartRegs)( &startRegs, tid );
 
-   Addr stack_highest_word = VG_(threads)[tid].client_stack_highest_word;
-   Addr stack_lowest_word  = 0;
+   Addr stack_highest_byte = VG_(threads)[tid].client_stack_highest_byte;
+   Addr stack_lowest_byte  = 0;
 
 #  if defined(VGP_x86_linux)
    /* Nasty little hack to deal with syscalls - if libc is using its
@@ -1425,7 +1678,7 @@ UInt VG_(get_StackTrace) ( ThreadId tid,
 
    /* See if we can get a better idea of the stack limits */
    VG_(stack_limits)( (Addr)startRegs.r_sp,
-                      &stack_lowest_word, &stack_highest_word );
+                      &stack_lowest_byte, &stack_highest_byte );
 
    /* Take into account the first_ip_delta. */
    startRegs.r_pc += (Long)(Word)first_ip_delta;
@@ -1433,28 +1686,31 @@ UInt VG_(get_StackTrace) ( ThreadId tid,
    if (0)
       VG_(printf)("tid %d: stack_highest=0x%08lx ip=0x%010llx "
                   "sp=0x%010llx\n",
-		  tid, stack_highest_word,
+		  tid, stack_highest_byte,
                   startRegs.r_pc, startRegs.r_sp);
 
    return VG_(get_StackTrace_wrk)(tid, ips, max_n_ips, 
                                        sps, fps,
                                        &startRegs,
-                                       stack_highest_word);
+                                       stack_highest_byte);
 }
 
 static void printIpDesc(UInt n, Addr ip, void* uu_opaque)
 {
-   #define BUF_LEN   4096
-   
-   static HChar buf[BUF_LEN];
+   InlIPCursor *iipc = VG_(new_IIPC)(ip);
 
-   VG_(describe_IP)(ip, buf, BUF_LEN);
-
-   if (VG_(clo_xml)) {
-      VG_(printf_xml)("    %s\n", buf);
-   } else {
-      VG_(message)(Vg_UserMsg, "   %s %s\n", ( n == 0 ? "at" : "by" ), buf);
-   }
+   do {
+      const HChar *buf = VG_(describe_IP)(ip, iipc);
+      if (VG_(clo_xml)) {
+         VG_(printf_xml)("    %s\n", buf);
+      } else {
+         VG_(message)(Vg_UserMsg, "   %s %s\n", 
+                      ( n == 0 ? "at" : "by" ), buf);
+      }
+      n++; 
+      // Increase n to show "at" for only one level.
+   } while (VG_(next_IIPC)(iipc));
+   VG_(delete_IIPC)(iipc);
 }
 
 /* Print a StackTrace. */

@@ -45,6 +45,7 @@
 
 #include "pub_core_basics.h"   // Addr
 #include "pub_core_xarray.h"   // XArray
+#include "pub_core_deduppoolalloc.h" // DedupPoolAlloc
 #include "priv_d3basics.h"     // GExpr et al.
 #include "priv_image.h"        // DiCursor
 
@@ -55,7 +56,7 @@
    ::sec_names is NULL.  If there are other names, these are stored in
    ::sec_names, which is a NULL terminated vector holding the names.
    The vector is allocated in VG_AR_DINFO, the names themselves live
-   in DebugInfo::strchunks.
+   in DebugInfo::strpool.
 
    From the point of view of ELF, the primary vs secondary distinction
    is artificial: they are all just names associated with the address,
@@ -68,11 +69,12 @@
    sec_names[] does not need to be allocated.
 */
 typedef 
-   struct { 
-      Addr    addr;    /* lowest address of entity */
-      Addr    tocptr;  /* ppc64-linux only: value that R2 should have */
-      HChar*  pri_name;  /* primary name, never NULL */
-      HChar** sec_names; /* NULL, or a NULL term'd array of other names */
+   struct {
+      SymAVMAs avmas;    /* Symbol Actual VMAs: lowest address of entity,
+                            + platform specific fields, to access with
+                            the macros defined in pub_core_debuginfo.h */
+      const HChar*  pri_name;  /* primary name, never NULL */
+      const HChar** sec_names; /* NULL, or a NULL term'd array of other names */
       // XXX: this could be shrunk (on 32-bit platforms) by using 30
       // bits for the size and 1 bit each for isText and isIFunc.  If you
       // do this, make sure that all assignments to the latter two use
@@ -102,6 +104,15 @@ typedef
  */
 #define OVERFLOW_DIFFERENCE     (LINENO_OVERFLOW - 5000)
 
+/* Filename and Dirname pair. FnDn are stored in di->fndnpool
+   and are allocated using VG_(allocFixedEltDedupPA).
+   The filename/dirname strings are themselves stored in di->strpool. */
+typedef
+   struct {
+      const HChar* filename;     /* source filename */
+      const HChar* dirname;      /* source directory name */
+   } FnDn;
+
 /* A structure to hold addr-to-source info for a single line.  There
   can be a lot of these, hence the dense packing. */
 typedef
@@ -111,12 +122,32 @@ typedef
       /* Word 2 */
       UShort size:LOC_SIZE_BITS; /* # bytes; we catch overflows of this */
       UInt   lineno:LINENO_BITS; /* source line number, or zero */
-      /* Word 3 */
-      const HChar* filename;     /* source filename */
-      /* Word 4 */
-      const HChar* dirname;      /* source directory name */
    }
    DiLoc;
+
+#define LEVEL_BITS  (32 - LINENO_BITS)
+#define MAX_LEVEL     ((1 << LEVEL_BITS) - 1)
+
+/* A structure to hold addr-to-inlined fn info.  There
+   can be a lot of these, hence the dense packing.
+   Only caller source filename and lineno are stored.
+   Handling dirname should be done using fndn_ix technique
+   similar to  ML_(addLineInfo). */
+typedef
+   struct {
+      /* Word 1 */
+      Addr   addr_lo;            /* lowest address for inlined fn */
+      /* Word 2 */
+      Addr   addr_hi;            /* highest address following the inlined fn */
+      /* Word 3 */
+      const HChar* inlinedfn;    /* inlined function name */
+      /* Word 4 and 5 */
+      UInt   fndn_ix;            /* index in di->fndnpool of caller source
+                                    dirname/filename */
+      UInt   lineno:LINENO_BITS; /* caller line number */
+      UShort level:LEVEL_BITS;   /* level of inlining */
+   }
+   DiInlLoc;
 
 /* --------------------- CF INFO --------------------- */
 
@@ -212,11 +243,11 @@ typedef
 #define CFIR_MEMCFAREL    ((UChar)67)
 #define CFIR_EXPR         ((UChar)68)
 
+/* Definition of the DiCfSI_m DiCfSI machine dependent part.
+   These are highly duplicated, and are stored in a pool. */
 #if defined(VGA_x86) || defined(VGA_amd64)
 typedef
    struct {
-      Addr  base;
-      UInt  len;
       UChar cfa_how; /* a CFIC_IA value */
       UChar ra_how;  /* a CFIR_ value */
       UChar sp_how;  /* a CFIR_ value */
@@ -226,12 +257,10 @@ typedef
       Int   sp_off;
       Int   bp_off;
    }
-   DiCfSI;
+   DiCfSI_m;
 #elif defined(VGA_arm)
 typedef
    struct {
-      Addr  base;
-      UInt  len;
       UChar cfa_how; /* a CFIC_ value */
       UChar ra_how;  /* a CFIR_ value */
       UChar r14_how; /* a CFIR_ value */
@@ -246,13 +275,13 @@ typedef
       Int   r12_off;
       Int   r11_off;
       Int   r7_off;
+      // If you add additional fields, don't forget to update the
+      // initialisation of this in readexidx.c accordingly.
    }
-   DiCfSI;
+   DiCfSI_m;
 #elif defined(VGA_arm64)
 typedef
    struct {
-      Addr  base;
-      UInt  len;
       UChar cfa_how; /* a CFIC_ value */
       UChar ra_how;  /* a CFIR_ value */
       UChar sp_how;  /* a CFIR_ value */ /*dw31=SP*/
@@ -264,27 +293,23 @@ typedef
       Int   x30_off;
       Int   x29_off;
    }
-   DiCfSI;
-#elif defined(VGA_ppc32) || defined(VGA_ppc64)
+   DiCfSI_m;
+#elif defined(VGA_ppc32) || defined(VGA_ppc64be) || defined(VGA_ppc64le)
 /* Just have a struct with the common fields in, so that code that
    processes the common fields doesn't have to be ifdef'd against
    VGP_/VGA_ symbols.  These are not used in any way on ppc32/64-linux
    at the moment. */
 typedef
    struct {
-      Addr  base;
-      UInt  len;
       UChar cfa_how; /* a CFIC_ value */
       UChar ra_how;  /* a CFIR_ value */
       Int   cfa_off;
       Int   ra_off;
    }
-   DiCfSI;
+   DiCfSI_m;
 #elif defined(VGA_s390x)
 typedef
    struct {
-      Addr  base;
-      UInt  len;
       UChar cfa_how; /* a CFIC_ value */
       UChar sp_how;  /* a CFIR_ value */
       UChar ra_how;  /* a CFIR_ value */
@@ -294,12 +319,10 @@ typedef
       Int   ra_off;
       Int   fp_off;
    }
-   DiCfSI;
+   DiCfSI_m;
 #elif defined(VGA_mips32) || defined(VGA_mips64)
 typedef
    struct {
-      Addr  base;
-      UInt  len;
       UChar cfa_how; /* a CFIC_ value */
       UChar ra_how;  /* a CFIR_ value */
       UChar sp_how;  /* a CFIR_ value */
@@ -309,11 +332,31 @@ typedef
       Int   sp_off;
       Int   fp_off;
    }
-   DiCfSI;
+   DiCfSI_m;
+#elif defined(VGA_tilegx)
+typedef
+   struct {
+      UChar cfa_how; /* a CFIC_IA value */
+      UChar ra_how;  /* a CFIR_ value */
+      UChar sp_how;  /* a CFIR_ value */
+      UChar fp_how;  /* a CFIR_ value */
+      Int   cfa_off;
+      Int   ra_off;
+      Int   sp_off;
+      Int   fp_off;
+   }
+   DiCfSI_m;
 #else
 #  error "Unknown arch"
 #endif
 
+typedef
+   struct {
+      Addr  base;
+      UInt  len;
+      UInt  cfsi_m_ix;
+   }
+   DiCfSI;
 
 typedef
    enum {
@@ -342,16 +385,25 @@ typedef
 
 typedef
    enum {
-      Creg_IA_SP=0x213,
+      Creg_INVALID=0x213,
+      Creg_IA_SP,
       Creg_IA_BP,
       Creg_IA_IP,
       Creg_ARM_R13,
       Creg_ARM_R12,
       Creg_ARM_R15,
       Creg_ARM_R14,
+      Creg_ARM_R7,
       Creg_ARM64_X30,
-      Creg_S390_R14,
-      Creg_MIPS_RA
+      Creg_S390_IA,
+      Creg_S390_SP,
+      Creg_S390_FP,
+      Creg_S390_LR,
+      Creg_MIPS_RA,
+      Creg_TILEGX_IP,
+      Creg_TILEGX_SP,
+      Creg_TILEGX_BP,
+      Creg_TILEGX_LR
    }
    CfiReg;
 
@@ -407,7 +459,7 @@ extern Int ML_(CfiExpr_Binop) ( XArray* dst, CfiBinop op, Int ixL, Int ixR );
 extern Int ML_(CfiExpr_CfiReg)( XArray* dst, CfiReg reg );
 extern Int ML_(CfiExpr_DwReg) ( XArray* dst, Int reg );
 
-extern void ML_(ppCfiExpr)( XArray* src, Int ix );
+extern void ML_(ppCfiExpr)( const XArray* src, Int ix );
 
 /* ---------------- FPO INFO (Windows PE) -------------- */
 
@@ -444,12 +496,12 @@ typedef
 
 typedef
    struct {
-      HChar* name;  /* in DebugInfo.strchunks */
+      const  HChar* name;  /* in DebugInfo.strpool */
       UWord  typeR; /* a cuOff */
-      GExpr* gexpr; /* on DebugInfo.gexprs list */
-      GExpr* fbGX;  /* SHARED. */
-      HChar* fileName; /* where declared; may be NULL. in
-                          DebugInfo.strchunks */
+      const GExpr* gexpr; /* on DebugInfo.gexprs list */
+      const GExpr* fbGX;  /* SHARED. */
+      UInt   fndn_ix; /* where declared; may be zero. index
+                         in DebugInfo.fndnpool */
       Int    lineNo;   /* where declared; may be zero. */
    }
    DiVariable;
@@ -485,35 +537,42 @@ ML_(cmp_for_DiAddrRange_range) ( const void* keyV, const void* elemV );
 
    that is, take the first r-x and rw- mapping we see, and we're done.
 
-   On MacOSX 10.7, 32-bit, there appears to be a new variant:
+   On MacOSX >= 10.7, 32-bit, there appears to be a new variant:
 
    start  -->  r-- mapping  -->  rw- mapping  
           -->  upgrade r-- mapping to r-x mapping  -->  accept
 
-   where the upgrade is done by a call to vm_protect.  Hence we
-   need to also track this possibility.
+   where the upgrade is done by a call to mach_vm_protect (OSX 10.7)
+   or kernelrpc_mach_vm_protect_trap (OSX 10.9 and possibly 10.8).
+   Hence we need to also track this possibility.
+
+   From perusal of dyld sources, it appears that this scheme could
+   also be used 64 bit libraries, although that doesn't seem to happen
+   in practice.  dyld uses this scheme when the text section requires
+   relocation, which only appears to be the case for 32 bit objects.
 */
 
-struct _DebugInfoMapping
+typedef struct
 {
    Addr  avma; /* these fields record the file offset, length */
    SizeT size; /* and map address of each mapping             */
    OffT  foff;
    Bool  rx, rw, ro;  /* memory access flags for this mapping */
-};
+} DebugInfoMapping;
 
 struct _DebugInfoFSM
 {
    HChar*  filename;  /* in mallocville (VG_AR_DINFO)               */
-   XArray* maps;      /* XArray of _DebugInfoMapping structs        */
+   HChar*  dbgname;   /* in mallocville (VG_AR_DINFO)               */
+   XArray* maps;      /* XArray of DebugInfoMapping structs         */
    Bool  have_rx_map; /* did we see a r?x mapping yet for the file? */
    Bool  have_rw_map; /* did we see a rw? mapping yet for the file? */
    Bool  have_ro_map; /* did we see a r-- mapping yet for the file? */
 };
 
 
-/* To do with the string table in struct _DebugInfo (::strchunks) */
-#define SEGINFO_STRCHUNKSIZE (64*1024)
+/* To do with the string table in struct _DebugInfo (::strpool) */
+#define SEGINFO_STRPOOLSIZE (64*1024)
 
 
 /* We may encounter more than one .eh_frame section in an object --
@@ -755,6 +814,18 @@ struct _DebugInfo {
    PtrdiffT sbss_bias;
    Addr     sbss_debug_svma;
    PtrdiffT sbss_debug_bias;
+   /* .ARM.exidx -- sometimes present on arm32, containing unwind info. */
+   Bool     exidx_present;
+   Addr     exidx_avma;
+   Addr     exidx_svma;
+   SizeT    exidx_size;
+   PtrdiffT exidx_bias;
+   /* .ARM.extab -- sometimes present on arm32, containing unwind info. */
+   Bool     extab_present;
+   Addr     extab_avma;
+   Addr     extab_svma;
+   SizeT    extab_size;
+   PtrdiffT extab_bias;
    /* .plt */
    Bool   plt_present;
    Addr	  plt_avma;
@@ -767,7 +838,7 @@ struct _DebugInfo {
    Bool   gotplt_present;
    Addr   gotplt_avma;
    SizeT  gotplt_size;
-   /* .opd -- needed on ppc64-linux for finding symbols */
+   /* .opd -- needed on ppc64be-linux for finding symbols */
    Bool   opd_present;
    Addr   opd_avma;
    SizeT  opd_size;
@@ -785,18 +856,86 @@ struct _DebugInfo {
    DiSym*  symtab;
    UWord   symtab_used;
    UWord   symtab_size;
-   /* An expandable array of locations. */
+   /* Two expandable arrays, storing locations and their filename/dirname. */
    DiLoc*  loctab;
+   UInt    sizeof_fndn_ix;  /* Similar use as sizeof_cfsi_m_ix below. */
+   void*   loctab_fndn_ix;  /* loctab[i] filename/dirname is identified by
+                               loctab_fnindex_ix[i] (an index in di->fndnpool)
+                               0 means filename/dirname unknown.
+                               The void* is an UChar* or UShort* or UInt*
+                               depending on sizeof_fndn_ix. */
    UWord   loctab_used;
    UWord   loctab_size;
-   /* An expandable array of CFI summary info records.  Also includes
-      summary address bounds, showing the min and max address covered
-      by any of the records, as an aid to fast searching.  And, if the
+   /* An expandable array of inlined fn info.
+      maxinl_codesz is the biggest inlined piece of code
+      in inltab (i.e. the max of 'addr_hi - addr_lo'. */
+   DiInlLoc* inltab;
+   UWord   inltab_used;
+   UWord   inltab_size;
+   SizeT   maxinl_codesz;
+
+   /* A set of expandable arrays to store CFI summary info records.
+      The machine specific information (i.e. the DiCfSI_m struct)
+      are stored in cfsi_m_pool, as these are highly duplicated.
+      The DiCfSI_m are allocated in cfsi_m_pool and identified using
+      a (we hope) small integer : often one byte is enough, sometimes
+      2 bytes are needed.
+
+      cfsi_base contains the bases of the code address ranges.
+      cfsi_size is the size of the cfsi_base array.
+      The elements cfsi_base[0] till cfsi_base[cfsi_used-1] are used.
+      Following elements are not used (yet).
+
+      For each base in cfsi_base, an index into cfsi_m_pool is stored
+      in cfsi_m_ix array. The size of cfsi_m_ix is equal to
+      cfsi_size*sizeof_cfsi_m_ix. The used portion of cfsi_m_ix is
+      cfsi_m_ix[0] till cfsi_m_ix[(cfsi_used-1)*sizeof_cfsi_m_ix].
+
+      cfsi_base[i] gives the base address of a code range covered by
+      some CF Info. The corresponding CF Info is identified by an index
+      in cfsi_m_pool. The DiCfSI_m index in cfsi_m_pool corresponding to
+      cfsi_base[i] is given
+        by ((UChar*) cfsi_m_ix)[i] if sizeof_cfsi_m_ix == 1
+        by ((UShort*)cfsi_m_ix)[i] if sizeof_cfsi_m_ix == 2
+        by ((UInt*)  cfsi_m_ix)[i] if sizeof_cfsi_m_ix == 4.
+
+      The end of the code range starting at cfsi_base[i] is given by
+      cfsi_base[i+1]-1 (or cfsi_maxavma for  cfsi_base[cfsi_used-1]).
+      Some code ranges between cfsi_minavma and cfsi_maxavma might not
+      be covered by cfi information. Such not covered ranges are stored by
+      a base in cfsi_base and a corresponding 0 index in cfsi_m_ix.
+
+      A variable size representation has been chosen for the elements of
+      cfsi_m_ix as in many case, one byte is good enough. For big
+      objects, 2 bytes are needed. No object has yet been found where
+      4 bytes are needed (but the code is ready to handle this case).
+      Not covered ranges ('cfi holes') are stored explicitely in
+      cfsi_base/cfsi_m_ix as this is more memory efficient than storing
+      a length for each covered range : on x86 or amd64, we typically have
+      a hole every 8 covered ranges. On arm64, we have very few holes
+      (1 every 50 or 100 ranges).
+      
+      The cfsi information is read and prepared in the cfsi_rd array.
+      Once all the information has been read, the cfsi_base and cfsi_m_ix
+      arrays will be filled in from cfsi_rd. cfsi_rd will then be freed.
+      This is all done by ML_(finish_CFSI_arrays).
+
+      Also includes summary address bounds, showing the min and max address
+      covered by any of the records, as an aid to fast searching.  And, if the
       records require any expression nodes, they are stored in
       cfsi_exprs. */
-   DiCfSI* cfsi;
+   Addr* cfsi_base;
+   UInt  sizeof_cfsi_m_ix; /* size in byte of indexes stored in cfsi_m_ix. */
+   void* cfsi_m_ix; /* Each index occupies sizeof_cfsi_m_ix bytes.
+                       The void* is an UChar* or UShort* or UInt*
+                       depending on sizeof_cfsi_m_ix.  */
+
+   DiCfSI* cfsi_rd; /* Only used during reading, NULL once info is read. */
+                                   
    UWord   cfsi_used;
    UWord   cfsi_size;
+
+   DedupPoolAlloc *cfsi_m_pool;
    Addr    cfsi_minavma;
    Addr    cfsi_maxavma;
    XArray* cfsi_exprs; /* XArray of CfiExpr */
@@ -809,13 +948,13 @@ struct _DebugInfo {
    Addr      fpo_maxavma;
    Addr      fpo_base_avma;
 
-   /* Expandable arrays of characters -- the string table.  Pointers
-      into this are stable (the arrays are not reallocated). */
-   struct strchunk {
-      UInt   strtab_used;
-      struct strchunk* next;
-      HChar  strtab[SEGINFO_STRCHUNKSIZE];
-   } *strchunks;
+   /* Pool of strings -- the string table.  Pointers
+      into this are stable (the memory is not reallocated). */
+   DedupPoolAlloc *strpool;
+
+   /* Pool of FnDn -- filename and dirname.
+      Elements in the pool are allocated using VG_(allocFixedEltDedupPA). */
+   DedupPoolAlloc *fndnpool;
 
    /* Variable scope information, as harvested from Dwarf3 files.
 
@@ -856,7 +995,7 @@ struct _DebugInfo {
    /* Cached last rx mapping matched and returned by ML_(find_rx_mapping).
       This helps performance a lot during ML_(addLineInfo) etc., which can
       easily be invoked hundreds of thousands of times. */
-   struct _DebugInfoMapping* last_rx_map;
+   DebugInfoMapping* last_rx_map;
 };
 
 /* --------------------- functions --------------------- */
@@ -870,36 +1009,82 @@ struct _DebugInfo {
    to ensure that's OK. */
 extern void ML_(addSym) ( struct _DebugInfo* di, DiSym* sym );
 
-/* Add a line-number record to a DebugInfo. */
+/* Add a filename/dirname pair to a DebugInfo and returns the index
+   in the fndnpool fixed pool. */
+extern UInt ML_(addFnDn) (struct _DebugInfo* di,
+                          const HChar* filename, 
+                          const HChar* dirname);  /* NULL is allowable */
+
+/* Returns the filename of the fndn pair identified by fndn_ix.
+   Returns "???" if fndn_ix is 0. */
+extern const HChar* ML_(fndn_ix2filename) (const DebugInfo* di,
+                                           UInt fndn_ix);
+
+/* Returns the dirname of the fndn pair identified by fndn_ix.
+   Returns "" if fndn_ix is 0 or fndn->dirname is NULL. */
+extern const HChar* ML_(fndn_ix2dirname) (const DebugInfo* di,
+                                          UInt fndn_ix);
+
+/* Returns the fndn_ix for the LineInfo locno in di->loctab.
+   0 if filename/dirname are unknown. */
+extern UInt ML_(fndn_ix) (const DebugInfo* di, Word locno);
+
+/* Add a line-number record to a DebugInfo.
+   fndn_ix is an index in di->fndnpool, allocated using  ML_(addFnDn).
+   Give a 0 index for a unknown filename/dirname pair. */
 extern
 void ML_(addLineInfo) ( struct _DebugInfo* di, 
-                        const HChar* filename, 
-                        const HChar* dirname,  /* NULL is allowable */
+                        UInt fndn_ix,
                         Addr this, Addr next, Int lineno, Int entry);
 
-/* Add a CFI summary record.  The supplied DiCfSI is copied. */
-extern void ML_(addDiCfSI) ( struct _DebugInfo* di, DiCfSI* cfsi );
+/* Add a call inlined record to a DebugInfo.
+   A call to the below means that inlinedfn code has been
+   inlined, resulting in code from [addr_lo, addr_hi[.
+   Note that addr_hi is excluded, i.e. is not part of the inlined code.
+   fndn_ix and lineno identifies the location of the call that caused
+   this inlining.
+   fndn_ix is an index in di->fndnpool, allocated using  ML_(addFnDn).
+   Give a 0 index for an unknown filename/dirname pair.
+   In case of nested inlining, a small level indicates the call
+   is closer to main that a call with a higher level. */
+extern
+void ML_(addInlInfo) ( struct _DebugInfo* di, 
+                       Addr addr_lo, Addr addr_hi,
+                       const HChar* inlinedfn,
+                       UInt fndn_ix,
+                       Int lineno, UShort level);
+
+/* Add a CFI summary record.  The supplied DiCfSI_m is copied. */
+extern void ML_(addDiCfSI) ( struct _DebugInfo* di, 
+                             Addr base, UInt len, DiCfSI_m* cfsi_m );
+
+/* Given a position in the di->cfsi_base/cfsi_m_ix arrays, return
+   the corresponding cfsi_m*. Return NULL if the position corresponds
+   to a cfsi hole. */
+DiCfSI_m* ML_(get_cfsi_m) (const DebugInfo* di, UInt pos);
 
 /* Add a string to the string table of a DebugInfo.  If len==-1,
    ML_(addStr) will itself measure the length of the string. */
-extern HChar* ML_(addStr) ( struct _DebugInfo* di, const HChar* str, Int len );
+extern const HChar* ML_(addStr) ( DebugInfo* di, const HChar* str, Int len );
 
 /* Add a string to the string table of a DebugInfo, by copying the
    string from the given DiCursor.  Measures the length of the string
    itself. */
-extern HChar* ML_(addStrFromCursor)( struct _DebugInfo* di, DiCursor c );
+extern const HChar* ML_(addStrFromCursor)( DebugInfo* di, DiCursor c );
 
 extern void ML_(addVar)( struct _DebugInfo* di,
                          Int    level,
                          Addr   aMin,
                          Addr   aMax,
-                         HChar* name,
+                         const  HChar* name,
                          UWord  typeR, /* a cuOff */
-                         GExpr* gexpr,
-                         GExpr* fbGX, /* SHARED. */
-                         HChar* fileName, /* where decl'd - may be NULL */
+                         const GExpr* gexpr,
+                         const GExpr* fbGX, /* SHARED. */
+                         UInt   fndn_ix, /* where decl'd - may be zero */
                          Int    lineNo, /* where decl'd - may be zero */
                          Bool   show );
+/* Note: fndn_ix identifies a filename/dirname pair similarly to
+   ML_(addInlInfo) and ML_(addLineInfo). */
 
 /* Canonicalise the tables held by 'di', in preparation for use.  Call
    this after finishing adding entries to these tables. */
@@ -910,46 +1095,52 @@ extern void ML_(canonicaliseTables) ( struct _DebugInfo* di );
    called on it's own to sort just this table. */
 extern void ML_(canonicaliseCFI) ( struct _DebugInfo* di );
 
+/* ML_(finish_CFSI_arrays) fills in the cfsi_base and cfsi_m_ix arrays
+   from cfsi_rd array. cfsi_rd is then freed. */
+extern void ML_(finish_CFSI_arrays) ( struct _DebugInfo* di );
+
 /* ------ Searching ------ */
 
 /* Find a symbol-table index containing the specified pointer, or -1
    if not found.  Binary search.  */
-extern Word ML_(search_one_symtab) ( struct _DebugInfo* di, Addr ptr,
+extern Word ML_(search_one_symtab) ( const DebugInfo* di, Addr ptr,
                                      Bool match_anywhere_in_sym,
                                      Bool findText );
 
 /* Find a location-table index containing the specified pointer, or -1
    if not found.  Binary search.  */
-extern Word ML_(search_one_loctab) ( struct _DebugInfo* di, Addr ptr );
+extern Word ML_(search_one_loctab) ( const DebugInfo* di, Addr ptr );
 
 /* Find a CFI-table index containing the specified pointer, or -1 if
    not found.  Binary search.  */
-extern Word ML_(search_one_cfitab) ( struct _DebugInfo* di, Addr ptr );
+extern Word ML_(search_one_cfitab) ( const DebugInfo* di, Addr ptr );
 
 /* Find a FPO-table index containing the specified pointer, or -1
    if not found.  Binary search.  */
-extern Word ML_(search_one_fpotab) ( struct _DebugInfo* di, Addr ptr );
+extern Word ML_(search_one_fpotab) ( const DebugInfo* di, Addr ptr );
 
 /* Helper function for the most often needed searching for an rx
    mapping containing the specified address range.  The range must
    fall entirely within the mapping to be considered to be within it.
    Asserts if lo > hi; caller must ensure this doesn't happen. */
-extern struct _DebugInfoMapping* ML_(find_rx_mapping) ( struct _DebugInfo* di,
-                                                        Addr lo, Addr hi );
+extern DebugInfoMapping* ML_(find_rx_mapping) ( DebugInfo* di,
+                                                Addr lo, Addr hi );
 
 /* ------ Misc ------ */
 
-/* Show a non-fatal debug info reading error.  Use vg_panic if
-   terminal.  'serious' errors are always shown, not 'serious' ones
+/* Show a non-fatal debug info reading error.  Use VG_(core_panic) for
+   fatal errors.  'serious' errors are always shown, not 'serious' ones
    are shown only at verbosity level 2 and above. */
 extern 
-void ML_(symerr) ( struct _DebugInfo* di, Bool serious, const HChar* msg );
+void ML_(symerr) ( const DebugInfo* di, Bool serious, const HChar* msg );
 
 /* Print a symbol. */
-extern void ML_(ppSym) ( Int idx, DiSym* sym );
+extern void ML_(ppSym) ( Int idx, const DiSym* sym );
 
 /* Print a call-frame-info summary. */
-extern void ML_(ppDiCfSI) ( XArray* /* of CfiExpr */ exprs, DiCfSI* si );
+extern void ML_(ppDiCfSI) ( const XArray* /* of CfiExpr */ exprs,
+                            Addr base, UInt len,
+                            const DiCfSI_m* si_m );
 
 
 #define TRACE_SYMTAB_ENABLED (di->trace_symtab)

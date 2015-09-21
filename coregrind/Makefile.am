@@ -22,7 +22,6 @@ endif
 
 
 EXTRA_DIST = \
-	m_debuginfo/UNUSED_STABS.txt \
 	m_debuginfo/README.txt \
 	m_gdbserver/README_DEVELOPERS \
 	docs/vgdb-manpage.xml
@@ -49,7 +48,7 @@ endif
 valgrind_CPPFLAGS  = $(AM_CPPFLAGS_PRI)
 valgrind_CFLAGS    = $(AM_CFLAGS_PRI)
 valgrind_CCASFLAGS = $(AM_CCASFLAGS_PRI)
-valgrind_LDFLAGS   = $(AM_CFLAGS_PRI)
+valgrind_LDFLAGS   = $(AM_CFLAGS_PRI) @LIB_UBSAN@
 if VGCONF_PLATFORMS_INCLUDE_X86_DARWIN
 valgrind_LDFLAGS   += -Wl,-read_only_relocs -Wl,suppress
 endif
@@ -61,18 +60,11 @@ endif
 
 
 vgdb_SOURCES = vgdb.c
-if VGCONF_PLATFORMS_INCLUDE_ARM64_LINUX
-# vgdb-invoker-ptrace.c isn't buildable on arm64-linux yet
-# so skip it.  Unfortunately this also causes it to be skipped
-# for 32-bit ARM builds which are part of a bi-arch ARM build.
-vgdb_SOURCES += vgdb-invoker-none.c
-else
 if VGCONF_OS_IS_LINUX
 if VGCONF_PLATVARIANT_IS_ANDROID
 vgdb_SOURCES += vgdb-invoker-none.c
 else
 vgdb_SOURCES += vgdb-invoker-ptrace.c
-endif
 endif
 endif
 if VGCONF_OS_IS_DARWIN
@@ -85,7 +77,7 @@ endif
 vgdb_CPPFLAGS  = $(AM_CPPFLAGS_PRI)
 vgdb_CFLAGS    = $(AM_CFLAGS_PRI)
 vgdb_CCASFLAGS = $(AM_CCASFLAGS_PRI)
-vgdb_LDFLAGS   = $(AM_CFLAGS_PRI)
+vgdb_LDFLAGS   = $(AM_CFLAGS_PRI) @LIB_UBSAN@
 if VGCONF_PLATVARIANT_IS_ANDROID
 vgdb_CFLAGS    += -static
 endif
@@ -158,6 +150,7 @@ $(mach_hdrs): $(mach_defs) $(mach_user_srcs) $(abs_builddir)/m_mach
 #----------------------------------------------------------------------------
 
 noinst_HEADERS = \
+	pub_core_addrinfo.h	\
 	pub_core_aspacehl.h	\
 	pub_core_aspacemgr.h	\
 	pub_core_basics.h	\
@@ -167,6 +160,7 @@ noinst_HEADERS = \
 	pub_core_commandline.h	\
 	pub_core_coredump.h	\
 	pub_core_cpuid.h	\
+	pub_core_deduppoolalloc.h \
 	pub_core_debuginfo.h	\
 	pub_core_debugger.h	\
 	pub_core_debuglog.h	\
@@ -176,6 +170,7 @@ noinst_HEADERS = \
 	pub_core_errormgr.h	\
 	pub_core_execontext.h	\
 	pub_core_gdbserver.h	\
+	pub_core_guest.h	\
 	pub_core_hashtable.h	\
 	pub_core_initimg.h	\
 	pub_core_inner.h	\
@@ -191,6 +186,7 @@ noinst_HEADERS = \
 	pub_core_mallocfree.h	\
 	pub_core_options.h	\
 	pub_core_oset.h		\
+	pub_core_rangemap.h	\
 	pub_core_redir.h	\
 	pub_core_poolalloc.h	\
 	pub_core_replacemalloc.h\
@@ -220,12 +216,12 @@ noinst_HEADERS = \
 	m_debuginfo/priv_misc.h	\
 	m_debuginfo/priv_storage.h	\
 	m_debuginfo/priv_tytypes.h      \
-	m_debuginfo/priv_readstabs.h	\
 	m_debuginfo/priv_readpdb.h	\
 	m_debuginfo/priv_d3basics.h	\
 	m_debuginfo/priv_readdwarf.h	\
 	m_debuginfo/priv_readdwarf3.h	\
 	m_debuginfo/priv_readelf.h	\
+	m_debuginfo/priv_readexidx.h	\
 	m_debuginfo/priv_readmacho.h	\
 	m_debuginfo/priv_image.h	\
 	m_debuginfo/lzoconf.h		\
@@ -247,14 +243,16 @@ noinst_HEADERS = \
 	m_scheduler/priv_sema.h \
 	m_scheduler/priv_sched-lock.h \
 	m_scheduler/priv_sched-lock-impl.h \
+	m_sigframe/priv_sigframe.h \
 	m_syswrap/priv_types_n_macros.h \
 	m_syswrap/priv_syswrap-generic.h \
 	m_syswrap/priv_syswrap-linux.h \
 	m_syswrap/priv_syswrap-linux-variants.h \
 	m_syswrap/priv_syswrap-darwin.h \
 	m_syswrap/priv_syswrap-main.h \
-       m_syswrap/priv_syswrap-xen.h \
-	m_ume/priv_ume.h
+	m_syswrap/priv_syswrap-xen.h \
+	m_ume/priv_ume.h \
+	vgdb.h
 
 #----------------------------------------------------------------------------
 # libcoregrind-<platform>.a
@@ -269,10 +267,13 @@ pkglib_LIBRARIES += libcoregrind-@VGCONF_ARCH_SEC@-@VGCONF_OS@.a
 endif
 
 COREGRIND_SOURCES_COMMON = \
+	m_addrinfo.c \
 	m_cache.c \
 	m_commandline.c \
+	m_compiler.c \
 	m_clientstate.c \
 	m_cpuid.S \
+	m_deduppoolalloc.c \
 	m_debugger.c \
 	m_debuglog.c \
 	m_errormgr.c \
@@ -291,6 +292,7 @@ COREGRIND_SOURCES_COMMON = \
 	m_mallocfree.c \
 	m_options.c \
 	m_oset.c \
+	m_rangemap.c \
 	m_redir.c \
 	m_sbprofile.c \
 	m_seqmatch.c \
@@ -311,6 +313,7 @@ COREGRIND_SOURCES_COMMON = \
 	m_aspacehl.c \
 	m_aspacemgr/aspacemgr-common.c \
 	m_aspacemgr/aspacemgr-linux.c \
+	m_aspacemgr/aspacemgr-segnames.c \
 	m_coredump/coredump-elf.c \
 	m_coredump/coredump-macho.c \
 	m_debuginfo/misc.c \
@@ -319,9 +322,9 @@ COREGRIND_SOURCES_COMMON = \
 	m_debuginfo/readdwarf.c \
 	m_debuginfo/readdwarf3.c \
 	m_debuginfo/readelf.c \
+	m_debuginfo/readexidx.c \
 	m_debuginfo/readmacho.c \
 	m_debuginfo/readpdb.c \
-	m_debuginfo/readstabs.c \
 	m_debuginfo/storage.c \
 	m_debuginfo/tytypes.c \
 	m_debuginfo/image.c \
@@ -334,12 +337,14 @@ COREGRIND_SOURCES_COMMON = \
 	m_dispatch/dispatch-x86-linux.S \
 	m_dispatch/dispatch-amd64-linux.S \
 	m_dispatch/dispatch-ppc32-linux.S \
-	m_dispatch/dispatch-ppc64-linux.S \
+	m_dispatch/dispatch-ppc64be-linux.S \
+	m_dispatch/dispatch-ppc64le-linux.S \
 	m_dispatch/dispatch-arm-linux.S \
 	m_dispatch/dispatch-arm64-linux.S \
 	m_dispatch/dispatch-s390x-linux.S \
 	m_dispatch/dispatch-mips32-linux.S \
 	m_dispatch/dispatch-mips64-linux.S \
+	m_dispatch/dispatch-tilegx-linux.S \
 	m_dispatch/dispatch-x86-darwin.S \
 	m_dispatch/dispatch-amd64-darwin.S \
 	m_gdbserver/inferiors.c \
@@ -359,6 +364,7 @@ COREGRIND_SOURCES_COMMON = \
 	m_gdbserver/valgrind-low-s390x.c \
 	m_gdbserver/valgrind-low-mips32.c \
 	m_gdbserver/valgrind-low-mips64.c \
+	m_gdbserver/valgrind-low-tilegx.c \
 	m_gdbserver/version.c \
 	m_initimg/initimg-linux.c \
 	m_initimg/initimg-darwin.c \
@@ -372,6 +378,7 @@ COREGRIND_SOURCES_COMMON = \
 	m_scheduler/sema.c \
 	m_scheduler/sched-lock.c \
 	m_scheduler/sched-lock-generic.c \
+	m_sigframe/sigframe-common.c \
 	m_sigframe/sigframe-x86-linux.c \
 	m_sigframe/sigframe-amd64-linux.c \
 	m_sigframe/sigframe-ppc32-linux.c \
@@ -381,17 +388,20 @@ COREGRIND_SOURCES_COMMON = \
 	m_sigframe/sigframe-s390x-linux.c \
 	m_sigframe/sigframe-mips32-linux.c \
 	m_sigframe/sigframe-mips64-linux.c \
+	m_sigframe/sigframe-tilegx-linux.c \
 	m_sigframe/sigframe-x86-darwin.c \
 	m_sigframe/sigframe-amd64-darwin.c \
 	m_syswrap/syscall-x86-linux.S \
 	m_syswrap/syscall-amd64-linux.S \
 	m_syswrap/syscall-ppc32-linux.S \
-	m_syswrap/syscall-ppc64-linux.S \
+	m_syswrap/syscall-ppc64be-linux.S \
+	m_syswrap/syscall-ppc64le-linux.S \
 	m_syswrap/syscall-arm-linux.S \
 	m_syswrap/syscall-arm64-linux.S \
 	m_syswrap/syscall-s390x-linux.S \
 	m_syswrap/syscall-mips32-linux.S \
 	m_syswrap/syscall-mips64-linux.S \
+	m_syswrap/syscall-tilegx-linux.S \
 	m_syswrap/syscall-x86-darwin.S \
 	m_syswrap/syscall-amd64-darwin.S \
 	m_syswrap/syswrap-main.c \
@@ -408,6 +418,7 @@ COREGRIND_SOURCES_COMMON = \
 	m_syswrap/syswrap-s390x-linux.c \
 	m_syswrap/syswrap-mips32-linux.c \
 	m_syswrap/syswrap-mips64-linux.c \
+	m_syswrap/syswrap-tilegx-linux.c \
 	m_syswrap/syswrap-x86-darwin.c \
 	m_syswrap/syswrap-amd64-darwin.c \
 	m_syswrap/syswrap-xen.c \
@@ -466,14 +477,14 @@ libreplacemalloc_toolpreload_@VGCONF_ARCH_PRI@_@VGCONF_OS@_a_SOURCES = \
 libreplacemalloc_toolpreload_@VGCONF_ARCH_PRI@_@VGCONF_OS@_a_CPPFLAGS = \
 	$(AM_CPPFLAGS_@VGCONF_PLATFORM_PRI_CAPS@)
 libreplacemalloc_toolpreload_@VGCONF_ARCH_PRI@_@VGCONF_OS@_a_CFLAGS = \
-	$(AM_CFLAGS_@VGCONF_PLATFORM_PRI_CAPS@) $(AM_CFLAGS_PIC)
+	$(AM_CFLAGS_PSO_@VGCONF_PLATFORM_PRI_CAPS@)
 if VGCONF_HAVE_PLATFORM_SEC
 libreplacemalloc_toolpreload_@VGCONF_ARCH_SEC@_@VGCONF_OS@_a_SOURCES = \
 	m_replacemalloc/vg_replace_malloc.c
 libreplacemalloc_toolpreload_@VGCONF_ARCH_SEC@_@VGCONF_OS@_a_CPPFLAGS = \
 	$(AM_CPPFLAGS_@VGCONF_PLATFORM_SEC_CAPS@)
 libreplacemalloc_toolpreload_@VGCONF_ARCH_SEC@_@VGCONF_OS@_a_CFLAGS = \
-	$(AM_CFLAGS_@VGCONF_PLATFORM_SEC_CAPS@) $(AM_CFLAGS_PIC)
+	$(AM_CFLAGS_PSO_@VGCONF_PLATFORM_SEC_CAPS@)
 endif
 
 #----------------------------------------------------------------------------
@@ -493,7 +504,7 @@ vgpreload_core_@VGCONF_ARCH_PRI@_@VGCONF_OS@_so_SOURCES = vg_preloaded.c
 vgpreload_core_@VGCONF_ARCH_PRI@_@VGCONF_OS@_so_CPPFLAGS = \
 	$(AM_CPPFLAGS_@VGCONF_PLATFORM_PRI_CAPS@)
 vgpreload_core_@VGCONF_ARCH_PRI@_@VGCONF_OS@_so_CFLAGS = \
-	$(AM_CFLAGS_@VGCONF_PLATFORM_PRI_CAPS@) $(AM_CFLAGS_PIC)
+	$(AM_CFLAGS_PSO_@VGCONF_PLATFORM_PRI_CAPS@)
 vgpreload_core_@VGCONF_ARCH_PRI@_@VGCONF_OS@_so_LDFLAGS = \
 	$(PRELOAD_LDFLAGS_@VGCONF_PLATFORM_PRI_CAPS@)
 if VGCONF_HAVE_PLATFORM_SEC
@@ -501,7 +512,7 @@ vgpreload_core_@VGCONF_ARCH_SEC@_@VGCONF_OS@_so_SOURCES = vg_preloaded.c
 vgpreload_core_@VGCONF_ARCH_SEC@_@VGCONF_OS@_so_CPPFLAGS = \
 	$(AM_CPPFLAGS_@VGCONF_PLATFORM_SEC_CAPS@)
 vgpreload_core_@VGCONF_ARCH_SEC@_@VGCONF_OS@_so_CFLAGS = \
-	$(AM_CFLAGS_@VGCONF_PLATFORM_SEC_CAPS@) $(AM_CFLAGS_PIC)
+	$(AM_CFLAGS_PSO_@VGCONF_PLATFORM_SEC_CAPS@)
 vgpreload_core_@VGCONF_ARCH_SEC@_@VGCONF_OS@_so_LDFLAGS = \
 	$(PRELOAD_LDFLAGS_@VGCONF_PLATFORM_SEC_CAPS@)
 endif
@@ -629,6 +640,8 @@ clean-local: clean-noinst_DSYMS
 
 install-exec-local: install-noinst_PROGRAMS install-noinst_DSYMS
 
+uninstall-local: uninstall-noinst_PROGRAMS uninstall-noinst_DSYMS
+
 #----------------------------------------------------------------------------
 # Darwin linker kludges
 #----------------------------------------------------------------------------
@@ -637,7 +650,7 @@ if VGCONF_OS_IS_DARWIN
 
 BUILT_SOURCES += fixup_macho_loadcmds
 fixup_macho_loadcmds: fixup_macho_loadcmds.c
-	$(CC) -g -Wall -o fixup_macho_loadcmds fixup_macho_loadcmds.c
+	$(CC) -I $(top_srcdir) -g -Wall -o $@ $<
 
 CLEANFILES += fixup_macho_loadcmds
 

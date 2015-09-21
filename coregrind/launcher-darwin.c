@@ -59,11 +59,15 @@ static struct {
    const char *apple_name;     // e.g. x86_64
    const char *valgrind_name;  // e.g. amd64
 } valid_archs[] = {
-   { CPU_TYPE_X86,       "i386",   "x86" }, 
-   { CPU_TYPE_X86_64,    "x86_64", "amd64" }, 
-   { CPU_TYPE_ARM,       "arm",    "arm" }, 
+   { CPU_TYPE_X86,       "i386",   "x86" },
+   { CPU_TYPE_X86_64,    "x86_64", "amd64" },
+   { CPU_TYPE_ARM,       "arm",    "arm" },
+   /* Not that it's actually relevant, since we don't support PPC on
+      MacOS X, but .. the Apple PPC descriptors refer to the BE
+      variant, since the LE variant is something that appeared long
+      after Apple dropped PPC. */
    { CPU_TYPE_POWERPC,   "ppc",    "ppc32" }, 
-   { CPU_TYPE_POWERPC64, "ppc64",  "ppc64" }, 
+   { CPU_TYPE_POWERPC64, "ppc64",  "ppc64be" }
 };
 static int valid_archs_count = sizeof(valid_archs)/sizeof(valid_archs[0]);
 
@@ -287,7 +291,7 @@ int main(int argc, char** argv, char** envp)
       asprintf(&vgpreload_core, "%s/vgpreload_core-%s-darwin.so", valgrind_lib, valid_archs[i].valgrind_name);
       if (access(vgpreload_core, R_OK|X_OK) != 0) {
          VG_(debugLog)(1, "launcher", "arch '%s' IS NOT installed\n", valid_archs[i].valgrind_name);
-         bzero(&valid_archs[i], sizeof(valid_archs[i]));
+         memset(&valid_archs[i], 0, sizeof(valid_archs[i]));
       } else {
          VG_(debugLog)(1, "launcher", "arch '%s' IS installed\n", valid_archs[i].valgrind_name);
       }

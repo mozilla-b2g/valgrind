@@ -33,7 +33,6 @@
 #include "pub_core_basics.h"
 #include "pub_core_vki.h"
 #include "pub_core_vkiscnums.h"
-#include "pub_core_libcsetjmp.h"   // to keep _threadstate.h happy
 #include "pub_core_threadstate.h"
 #include "pub_core_aspacemgr.h"
 #include "pub_core_debuginfo.h"    // VG_(di_notify_*)
@@ -244,7 +243,8 @@ static void run_a_thread_NORETURN ( Word tidW )
          : "n" (VgTs_Empty), "n" (__NR_exit), "m" (tst->os_state.exitcode)
          : "rax", "rdi"
       );
-#elif defined(VGP_ppc32_linux) || defined(VGP_ppc64_linux)
+#elif defined(VGP_ppc32_linux) || defined(VGP_ppc64be_linux) \
+      || defined(VGP_ppc64le_linux)
       { UInt vgts_empty = (UInt)VgTs_Empty;
         asm volatile (
           "stw %1,%0\n\t"          /* set tst->status = VgTs_Empty */
@@ -296,6 +296,15 @@ static void run_a_thread_NORETURN ( Word tidW )
          : "r" (VgTs_Empty), "n" (__NR_exit), "m" (tst->os_state.exitcode)
          : "cc", "memory" , "v0", "a0"
       );
+#elif defined(VGP_tilegx_linux)
+      asm volatile (
+         "st4    %0,  %1\n"      /* set tst->status = VgTs_Empty */
+         "moveli r10, %2\n"      /* set r10 = __NR_exit */
+         "move   r0,  %3\n"      /* set  r0 = tst->os_state.exitcode */
+         "swint1\n"              /* exit(tst->os_state.exitcode) */
+         : "=m" (tst->status)
+         : "r" (VgTs_Empty), "n" (__NR_exit), "r" (tst->os_state.exitcode)
+         : "r0", "r1", "r2", "r3", "r4", "r5");
 #else
 # error Unknown platform
 #endif
@@ -385,7 +394,7 @@ void VG_(main_thread_wrapper_NORETURN)(ThreadId tid)
    sp -= 16;
    sp &= ~0xF;
    *(UWord *)sp = 0;
-#elif defined(VGP_ppc64_linux)
+#elif defined(VGP_ppc64be_linux) || defined(VGP_ppc64le_linux)
    /* make a stack frame */
    sp -= 112;
    sp &= ~((Addr)0xF);
@@ -438,13 +447,14 @@ SysRes ML_(do_fork_clone) ( ThreadId tid, UInt flags,
    /* Since this is the fork() form of clone, we don't need all that
       VG_(clone) stuff */
 #if defined(VGP_x86_linux) \
-    || defined(VGP_ppc32_linux) || defined(VGP_ppc64_linux) \
+    || defined(VGP_ppc32_linux) \
+    || defined(VGP_ppc64be_linux) || defined(VGP_ppc64le_linux)	\
     || defined(VGP_arm_linux) || defined(VGP_mips32_linux) \
     || defined(VGP_mips64_linux) || defined(VGP_arm64_linux)
    res = VG_(do_syscall5)( __NR_clone, flags, 
                            (UWord)NULL, (UWord)parent_tidptr, 
                            (UWord)NULL, (UWord)child_tidptr );
-#elif defined(VGP_amd64_linux)
+#elif defined(VGP_amd64_linux) || defined(VGP_tilegx_linux)
    /* note that the last two arguments are the opposite way round to x86 and
       ppc32 as the amd64 kernel expects the arguments in a different order */
    res = VG_(do_syscall5)( __NR_clone, flags, 
@@ -551,6 +561,18 @@ PRE(sys_umount)
    PRE_REG_READ2(long, "umount2", char *, path, int, flags);
    PRE_MEM_RASCIIZ( "umount2(path)", ARG1);
 }
+
+/* Not actually wrapped by GLibc but does things with the system
+ * mounts so it is put here.
+ */
+PRE(sys_pivot_root)
+{
+   PRINT("sys_pivot_root ( %s %s )", (HChar*)ARG1, (HChar*)ARG2);
+   PRE_REG_READ2(int, "pivot_root", char *, new_root, char *, old_root);
+   PRE_MEM_RASCIIZ( "pivot_root(new_root)", ARG1);
+   PRE_MEM_RASCIIZ( "pivot_root(old_root)", ARG2);
+}
+
 
 /* ---------------------------------------------------------------------
    16- and 32-bit uid/gid wrappers
@@ -1001,6 +1023,24 @@ PRE(sys_prctl)
    case VKI_PR_SET_ENDIAN:
       PRE_REG_READ2(int, "prctl", int, option, int, value);
       break;
+   case VKI_PR_SET_PTRACER:
+      PRE_REG_READ2(int, "prctl", int, option, int, ptracer_process_ID);
+      break;
+   case VKI_PR_SET_SECCOMP:
+      /* This is a bit feeble in that it uses |option| before checking
+         it, but at least both sides of the conditional check it. */
+      if (ARG2 == VKI_SECCOMP_MODE_FILTER) {
+         PRE_REG_READ3(int, "prctl", int, option, int, mode, char*, filter);
+         if (ARG3) {
+            /* Should check that ARG3 points at a valid struct sock_fprog.
+               Sounds complex; hence be lame. */
+            PRE_MEM_READ( "prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, filter)",
+                          ARG3, 1 );
+         }
+      } else {
+         PRE_REG_READ2(int, "prctl", int, option, int, mode);
+      }
+      break;
    default:
       PRE_REG_READ5(long, "prctl",
                     int, option, unsigned long, arg2, unsigned long, arg3,
@@ -1038,8 +1078,7 @@ POST(sys_prctl)
 
             /* Don't bother reusing the memory. This is a rare event. */
             tst->thread_name =
-              VG_(arena_realloc)(VG_AR_CORE, "syswrap.prctl",
-                                 tst->thread_name, new_len + 1);
+              VG_(realloc)("syswrap.prctl", tst->thread_name, new_len + 1);
             VG_(strcpy)(tst->thread_name, new_name);
          }
       }
@@ -1269,7 +1308,7 @@ PRE(sys_ppoll)
                     (Addr)(&ufds[i].fd), sizeof(ufds[i].fd) );
       PRE_MEM_READ( "ppoll(ufds.events)",
                     (Addr)(&ufds[i].events), sizeof(ufds[i].events) );
-      PRE_MEM_WRITE( "ppoll(ufd.revents)",
+      PRE_MEM_WRITE( "ppoll(ufds.revents)",
                      (Addr)(&ufds[i].revents), sizeof(ufds[i].revents) );
    }
 
@@ -1697,7 +1736,7 @@ PRE(sys_io_destroy)
       Bool d = VG_(am_notify_munmap)( ARG1, size );
       VG_TRACK( die_mem_munmap, ARG1, size );
       if (d)
-         VG_(discard_translations)( (Addr64)ARG1, (ULong)size, 
+        VG_(discard_translations)( (Addr)ARG1, (ULong)size, 
                                     "PRE(sys_io_destroy)" );
    }  
 }  
@@ -2251,7 +2290,7 @@ static Bool linux_kernel_2_6_22(void)
 {
    static Int result = -1;
    Int fd, read;
-   HChar release[64];
+   HChar release[64];   // large enough
    SysRes res;
 
    if (result == -1) {
@@ -2260,12 +2299,13 @@ static Bool linux_kernel_2_6_22(void)
          return False;
       fd = sr_Res(res);
       read = VG_(read)(fd, release, sizeof(release) - 1);
-      vg_assert(read >= 0);
+      if (read < 0)
+         return False;
       release[read] = 0;
       VG_(close)(fd);
       //VG_(printf)("kernel release = %s\n", release);
-      result = (VG_(strncmp)(release, "2.6.22", 6) == 0
-                && (release[6] < '0' || release[6] > '9'));
+      result = VG_(strncmp)(release, "2.6.22", 6) == 0
+               && ! VG_(isdigit)(release[6]);
    }
    vg_assert(result == 0 || result == 1);
    return result == 1;
@@ -2747,6 +2787,12 @@ POST(sys_sched_getaffinity)
    POST_MEM_WRITE(ARG3, ARG2);
 }
 
+PRE(sys_unshare)
+{
+   PRINT("sys_unshare ( %ld )", ARG1);
+   PRE_REG_READ1(int, "unshare", int, flags);
+}
+
 /* ---------------------------------------------------------------------
    miscellaneous wrappers
    ------------------------------------------------------------------ */
@@ -2983,6 +3029,46 @@ PRE(sys_move_pages)
 POST(sys_move_pages)
 {
    POST_MEM_WRITE(ARG5, ARG2 * sizeof(int));
+}
+
+PRE(sys_getrandom)
+{
+   PRINT("sys_getrandom ( %#lx, %ld, %ld )" , ARG1,ARG2,ARG3);
+   PRE_REG_READ3(int, "getrandom",
+                 char *, buf, vki_size_t, count, unsigned int, flags);
+   PRE_MEM_WRITE( "getrandom(cpu)", ARG1, ARG2 );
+}
+
+POST(sys_getrandom)
+{
+   POST_MEM_WRITE( ARG1, ARG2 );
+}
+
+PRE(sys_memfd_create)
+{
+   PRINT("sys_memfd_create ( %#lx, %ld )" , ARG1,ARG2);
+   PRE_REG_READ2(int, "memfd_create",
+                 char *, uname, unsigned int, flags);
+   PRE_MEM_RASCIIZ( "memfd_create(uname)", ARG1 );
+}
+
+POST(sys_memfd_create)
+{
+   vg_assert(SUCCESS);
+   if (!ML_(fd_allowed)(RES, "memfd_create", tid, True)) {
+      VG_(close)(RES);
+      SET_STATUS_Failure( VKI_EMFILE );
+   } else {
+      if (VG_(clo_track_fds))
+         ML_(record_fd_open_nameless)(tid, RES);
+   }
+}
+
+PRE(sys_syncfs)
+{
+   *flags |= SfMayBlock;
+   PRINT("sys_syncfs ( %ld )", ARG1);
+   PRE_REG_READ1(long, "syncfs", unsigned int, fd);
 }
 
 /* ---------------------------------------------------------------------
@@ -3574,6 +3660,15 @@ PRE(sys_ipc)
    case VKI_SHMGET:
       PRE_REG_READ4(int, "ipc",
                     vki_uint, call, int, first, int, second, int, third);
+      if (ARG4 & VKI_SHM_HUGETLB) {
+         static Bool warning_given = False;
+         ARG4 &= ~VKI_SHM_HUGETLB;
+         if (!warning_given) {
+            warning_given = True;
+            VG_(umsg)(
+               "WARNING: valgrind ignores shmget(shmflg) SHM_HUGETLB\n");
+         }
+      }
       break;
    case VKI_SHMCTL: /* IPCOP_shmctl */
       PRE_REG_READ5(int, "ipc",
@@ -3776,6 +3871,15 @@ PRE(sys_shmget)
 {
    PRINT("sys_shmget ( %ld, %ld, %ld )",ARG1,ARG2,ARG3);
    PRE_REG_READ3(long, "shmget", vki_key_t, key, vki_size_t, size, int, shmflg);
+   if (ARG3 & VKI_SHM_HUGETLB) {
+      static Bool warning_given = False;
+      ARG3 &= ~VKI_SHM_HUGETLB;
+      if (!warning_given) {
+         warning_given = True;
+         VG_(umsg)(
+            "WARNING: valgrind ignores shmget(shmflg) SHM_HUGETLB\n");
+      }
+   }
 }
 
 PRE(wrap_sys_shmat)
@@ -3992,6 +4096,20 @@ PRE(sys_socketcall)
       ML_(generic_PRE_sys_recvmsg)( tid, "msg", (struct vki_msghdr *)ARG2_1 );
       break;
 
+   case VKI_SYS_RECVMMSG:
+      /* int recvmmsg(int s, struct mmsghdr *mmsg, int vlen, int flags,
+                      struct timespec *timeout); */
+      PRE_MEM_READ_ef("socketcall.recvmmsg(args)", ARG2, 5*sizeof(Addr) );
+      ML_(linux_PRE_sys_recvmmsg)( tid, ARG2_0, ARG2_1, ARG2_2, ARG2_3,
+                                   ARG2_4 );
+      break;
+
+   case VKI_SYS_SENDMMSG:
+      /* int sendmmsg(int s, struct mmsghdr *mmsg, int vlen, int flags); */
+      PRE_MEM_READ_ef("socketcall.sendmmsg(args)", ARG2, 4*sizeof(Addr) );
+      ML_(linux_PRE_sys_sendmmsg)( tid, ARG2_0, ARG2_1, ARG2_2, ARG2_3 );
+      break;
+
    default:
       VG_(message)(Vg_DebugMsg,"Warning: unhandled socketcall 0x%lx\n",ARG1);
       SET_STATUS_Failure( VKI_EINVAL );
@@ -4095,6 +4213,15 @@ POST(sys_socketcall)
 
    case VKI_SYS_RECVMSG:
       ML_(generic_POST_sys_recvmsg)( tid, "msg", (struct vki_msghdr *)ARG2_1, RES );
+      break;
+
+   case VKI_SYS_RECVMMSG:
+      ML_(linux_POST_sys_recvmmsg)( tid, RES,
+                                    ARG2_0, ARG2_1, ARG2_2, ARG2_3, ARG2_4 );
+      break;
+
+   case VKI_SYS_SENDMMSG:
+      ML_(linux_POST_sys_sendmmsg)( tid, RES, ARG2_0, ARG2_1, ARG2_2, ARG2_3 );
       break;
 
    default:
@@ -4334,7 +4461,7 @@ POST(sys_socketpair)
 
 PRE(sys_openat)
 {
-   HChar  name[30];
+   HChar  name[30];   // large enough
    SysRes sres;
 
    if (ARG3 & VKI_O_CREAT) {
@@ -4352,10 +4479,11 @@ PRE(sys_openat)
    PRE_MEM_RASCIIZ( "openat(filename)", ARG2 );
 
    /* For absolute filenames, dfd is ignored.  If dfd is AT_FDCWD,
-      filename is relative to cwd.  */
+      filename is relative to cwd.  When comparing dfd against AT_FDCWD,
+      be sure only to compare the bottom 32 bits. */
    if (ML_(safe_to_deref)( (void*)ARG2, 1 )
        && *(Char *)ARG2 != '/'
-       && ARG1 != VKI_AT_FDCWD
+       && ((Int)ARG1) != ((Int)VKI_AT_FDCWD)
        && !ML_(fd_allowed)(ARG1, "openat", tid, False))
       SET_STATUS_Failure( VKI_EBADF );
 
@@ -4515,7 +4643,7 @@ PRE(sys_symlinkat)
 
 PRE(sys_readlinkat)
 {
-   HChar name[25];
+   HChar name[30];       // large enough
    Word  saved = SYSNO;
 
    PRINT("sys_readlinkat ( %ld, %#lx(%s), %#lx, %llu )", ARG1,ARG2,(char*)ARG2,ARG3,(ULong)ARG4);
@@ -4774,64 +4902,31 @@ PRE(sys_process_vm_writev)
 
 PRE(sys_sendmmsg)
 {
-   struct vki_mmsghdr *mmsg = (struct vki_mmsghdr *)ARG2;
-   HChar name[32];
-   UInt i;
    *flags |= SfMayBlock;
    PRINT("sys_sendmmsg ( %ld, %#lx, %ld, %ld )",ARG1,ARG2,ARG3,ARG4);
    PRE_REG_READ4(long, "sendmmsg",
                  int, s, const struct mmsghdr *, mmsg, int, vlen, int, flags);
-   for (i = 0; i < ARG3; i++) {
-      VG_(sprintf)(name, "mmsg[%u].msg_hdr", i);
-      ML_(generic_PRE_sys_sendmsg)(tid, name, &mmsg[i].msg_hdr);
-      VG_(sprintf)(name, "sendmmsg(mmsg[%u].msg_len)", i);
-      PRE_MEM_WRITE( name, (Addr)&mmsg[i].msg_len, sizeof(mmsg[i].msg_len) );
-   }
+   ML_(linux_PRE_sys_sendmmsg)(tid, ARG1,ARG2,ARG3,ARG4);
 }
 
 POST(sys_sendmmsg)
 {
-   if (RES > 0) {
-      struct vki_mmsghdr *mmsg = (struct vki_mmsghdr *)ARG2;
-      UInt i;
-      for (i = 0; i < RES; i++) {
-         POST_MEM_WRITE( (Addr)&mmsg[i].msg_len, sizeof(mmsg[i].msg_len) );
-      }
-   }
+   ML_(linux_POST_sys_sendmmsg) (tid, RES, ARG1,ARG2,ARG3,ARG4);
 }
 
 PRE(sys_recvmmsg)
 {
-   struct vki_mmsghdr *mmsg = (struct vki_mmsghdr *)ARG2;
-   HChar name[32];
-   UInt i;
    *flags |= SfMayBlock;
    PRINT("sys_recvmmsg ( %ld, %#lx, %ld, %ld, %#lx )",ARG1,ARG2,ARG3,ARG4,ARG5);
    PRE_REG_READ5(long, "recvmmsg",
                  int, s, struct mmsghdr *, mmsg, int, vlen,
                  int, flags, struct timespec *, timeout);
-   for (i = 0; i < ARG3; i++) {
-      VG_(sprintf)(name, "mmsg[%u].msg_hdr", i);
-      ML_(generic_PRE_sys_recvmsg)(tid, name, &mmsg[i].msg_hdr);
-      VG_(sprintf)(name, "recvmmsg(mmsg[%u].msg_len)", i);
-      PRE_MEM_WRITE( name, (Addr)&mmsg[i].msg_len, sizeof(mmsg[i].msg_len) );
-   }
-   if (ARG5)
-      PRE_MEM_READ( "recvmmsg(timeout)", ARG5, sizeof(struct vki_timespec) );
+   ML_(linux_PRE_sys_recvmmsg)(tid, ARG1,ARG2,ARG3,ARG4,ARG5);
 }
 
 POST(sys_recvmmsg)
 {
-   if (RES > 0) {
-      struct vki_mmsghdr *mmsg = (struct vki_mmsghdr *)ARG2;
-      HChar name[32];
-      UInt i;
-      for (i = 0; i < RES; i++) {
-         VG_(sprintf)(name, "mmsg[%u].msg_hdr", i);
-         ML_(generic_POST_sys_recvmsg)(tid, name, &mmsg[i].msg_hdr, mmsg[i].msg_len);
-         POST_MEM_WRITE( (Addr)&mmsg[i].msg_len, sizeof(mmsg[i].msg_len) );
-      }
-   }
+   ML_(linux_POST_sys_recvmmsg) (tid, RES, ARG1,ARG2,ARG3,ARG4,ARG5);
 }
 
 /* ---------------------------------------------------------------------
@@ -5143,7 +5238,8 @@ POST(sys_lookup_dcookie)
 }
 #endif
 
-#if defined(VGP_amd64_linux) || defined(VGP_s390x_linux)
+#if defined(VGP_amd64_linux) || defined(VGP_s390x_linux)        \
+      || defined(VGP_tilegx_linux)
 PRE(sys_lookup_dcookie)
 {
    *flags |= SfMayBlock;
@@ -5205,6 +5301,9 @@ PRE(sys_fcntl)
    case VKI_F_SETLK64:
    case VKI_F_SETLKW64:
 #  endif
+   case VKI_F_OFD_GETLK:
+   case VKI_F_OFD_SETLK:
+   case VKI_F_OFD_SETLKW:
       PRINT("sys_fcntl[ARG3=='lock'] ( %ld, %ld, %#lx )", ARG1,ARG2,ARG3);
       PRE_REG_READ3(long, "fcntl",
                     unsigned int, fd, unsigned int, cmd,
@@ -5225,151 +5324,6 @@ PRE(sys_fcntl)
                     unsigned int, fd, unsigned int, cmd,
                     struct vki_f_owner_ex *, arg);
       PRE_MEM_WRITE("fcntl(F_GETOWN_EX)", ARG3, sizeof(struct vki_f_owner_ex));
-      break;
-
-   case VKI_DRM_IOCTL_VERSION:
-      if (ARG3) {
-         struct vki_drm_version *data = (struct vki_drm_version *)ARG3;
-	 PRE_MEM_WRITE("ioctl(DRM_VERSION).version_major", (Addr)&data->version_major, sizeof(data->version_major));
-         PRE_MEM_WRITE("ioctl(DRM_VERSION).version_minor", (Addr)&data->version_minor, sizeof(data->version_minor));
-         PRE_MEM_WRITE("ioctl(DRM_VERSION).version_patchlevel", (Addr)&data->version_patchlevel, sizeof(data->version_patchlevel));
-         PRE_MEM_READ("ioctl(DRM_VERSION).name_len", (Addr)&data->name_len, sizeof(data->name_len));
-         PRE_MEM_READ("ioctl(DRM_VERSION).name", (Addr)&data->name, sizeof(data->name));
-         PRE_MEM_WRITE("ioctl(DRM_VERSION).name", (Addr)data->name, data->name_len);
-         PRE_MEM_READ("ioctl(DRM_VERSION).date_len", (Addr)&data->date_len, sizeof(data->date_len));
-         PRE_MEM_READ("ioctl(DRM_VERSION).date", (Addr)&data->date, sizeof(data->date));
-         PRE_MEM_WRITE("ioctl(DRM_VERSION).date", (Addr)data->date, data->date_len);
-         PRE_MEM_READ("ioctl(DRM_VERSION).desc_len", (Addr)&data->desc_len, sizeof(data->desc_len));
-         PRE_MEM_READ("ioctl(DRM_VERSION).desc", (Addr)&data->desc, sizeof(data->desc));
-         PRE_MEM_WRITE("ioctl(DRM_VERSION).desc", (Addr)data->desc, data->desc_len);
-      }
-      break;
-   case VKI_DRM_IOCTL_GET_UNIQUE:
-      if (ARG3) {
-         struct vki_drm_unique *data = (struct vki_drm_unique *)ARG3;
-	 PRE_MEM_READ("ioctl(DRM_GET_UNIQUE).unique_len", (Addr)&data->unique_len, sizeof(data->unique_len));
-	 PRE_MEM_READ("ioctl(DRM_GET_UNIQUE).unique", (Addr)&data->unique, sizeof(data->unique));
-	 PRE_MEM_WRITE("ioctl(DRM_GET_UNIQUE).unique", (Addr)data->unique, data->unique_len);
-      }
-      break;
-   case VKI_DRM_IOCTL_GET_MAGIC:
-      if (ARG3) {
-         struct vki_drm_auth *data = (struct vki_drm_auth *)ARG3;
-         PRE_MEM_WRITE("ioctl(DRM_GET_MAGIC).magic", (Addr)&data->magic, sizeof(data->magic));
-      }
-      break;
-   case VKI_DRM_IOCTL_WAIT_VBLANK:
-      if (ARG3) {
-         union vki_drm_wait_vblank *data = (union vki_drm_wait_vblank *)ARG3;
-	 PRE_MEM_READ("ioctl(DRM_WAIT_VBLANK).request.type", (Addr)&data->request.type, sizeof(data->request.type));
-	 PRE_MEM_READ("ioctl(DRM_WAIT_VBLANK).request.sequence", (Addr)&data->request.sequence, sizeof(data->request.sequence));
-	 /* XXX: It seems request.signal isn't used */
-         PRE_MEM_WRITE("ioctl(DRM_WAIT_VBLANK).reply", (Addr)&data->reply, sizeof(data->reply));
-      }
-      break;
-   case VKI_DRM_IOCTL_GEM_CLOSE:
-      if (ARG3) {
-         struct vki_drm_gem_close *data = (struct vki_drm_gem_close *)ARG3;
-	 PRE_MEM_READ("ioctl(DRM_GEM_CLOSE).handle", (Addr)&data->handle, sizeof(data->handle));
-      }
-      break;
-   case VKI_DRM_IOCTL_GEM_FLINK:
-      if (ARG3) {
-         struct vki_drm_gem_flink *data = (struct vki_drm_gem_flink *)ARG3;
-	 PRE_MEM_READ("ioctl(DRM_GEM_FLINK).handle", (Addr)&data->handle, sizeof(data->handle));
-         PRE_MEM_WRITE("ioctl(DRM_GEM_FLINK).name", (Addr)&data->name, sizeof(data->name));
-      }
-      break;
-   case VKI_DRM_IOCTL_GEM_OPEN:
-      if (ARG3) {
-         struct vki_drm_gem_open *data = (struct vki_drm_gem_open *)ARG3;
-	 PRE_MEM_READ("ioctl(DRM_GEM_OPEN).name", (Addr)&data->name, sizeof(data->name));
-	 PRE_MEM_WRITE("ioctl(DRM_GEM_OPEN).handle", (Addr)&data->handle, sizeof(data->handle));
-	 PRE_MEM_WRITE("ioctl(DRM_GEM_OPEN).size", (Addr)&data->size, sizeof(data->size));
-      }
-      break;
-   case VKI_DRM_IOCTL_I915_GETPARAM:
-      if (ARG3) {
-         vki_drm_i915_getparam_t *data = (vki_drm_i915_getparam_t *)ARG3;
-	 PRE_MEM_READ("ioctl(DRM_I915_GETPARAM).param", (Addr)&data->param, sizeof(data->param));
-	 PRE_MEM_WRITE("ioctl(DRM_I915_GETPARAM).value", (Addr)data->value, sizeof(int));
-      }
-      break;
-   case VKI_DRM_IOCTL_I915_GEM_BUSY:
-      if (ARG3) {
-         struct vki_drm_i915_gem_busy *data = (struct vki_drm_i915_gem_busy *)ARG3;
-	 PRE_MEM_READ("ioctl(DRM_I915_GEM_BUSY).handle", (Addr)&data->handle, sizeof(data->handle));
-         PRE_MEM_WRITE("ioctl(DRM_I915_GEM_BUSY).busy", (Addr)&data->busy, sizeof(data->busy));
-      }
-      break;
-   case VKI_DRM_IOCTL_I915_GEM_CREATE:
-      if (ARG3) {
-         struct vki_drm_i915_gem_create *data = (struct vki_drm_i915_gem_create *)ARG3;
-	 PRE_MEM_READ("ioctl(DRM_I915_GEM_CREATE).size", (Addr)&data->size, sizeof(data->size));
-	 PRE_MEM_WRITE("ioctl(DRM_I915_GEM_CREATE).handle", (Addr)&data->handle, sizeof(data->handle));
-      }
-      break;
-   case VKI_DRM_IOCTL_I915_GEM_PREAD:
-      if (ARG3) {
-         struct vki_drm_i915_gem_pread *data = (struct vki_drm_i915_gem_pread *)ARG3;
-	 PRE_MEM_READ("ioctl(DRM_I915_GEM_PREAD).handle", (Addr)&data->handle, sizeof(data->handle));
-	 PRE_MEM_READ("ioctl(DRM_I915_GEM_PREAD).offset", (Addr)&data->offset, sizeof(data->offset));
-	 PRE_MEM_READ("ioctl(DRM_I915_GEM_PREAD).size", (Addr)&data->size, sizeof(data->size));
-	 PRE_MEM_READ("ioctl(DRM_I915_GEM_PREAD).data_ptr", (Addr)&data->data_ptr, sizeof(data->data_ptr));
-	 PRE_MEM_WRITE("ioctl(DRM_I915_GEM_PREAD).data_ptr", (Addr)data->data_ptr, data->size);
-      }
-      break;
-   case VKI_DRM_IOCTL_I915_GEM_PWRITE:
-      if (ARG3) {
-         struct vki_drm_i915_gem_pwrite *data = (struct vki_drm_i915_gem_pwrite *)ARG3;
-	 PRE_MEM_READ("ioctl(DRM_I915_GEM_PWRITE).handle", (Addr)&data->handle, sizeof(data->handle));
-	 PRE_MEM_READ("ioctl(DRM_I915_GEM_PWRITE).offset", (Addr)&data->offset, sizeof(data->offset));
-	 PRE_MEM_READ("ioctl(DRM_I915_GEM_PWRITE).size", (Addr)&data->size, sizeof(data->size));
-	 PRE_MEM_READ("ioctl(DRM_I915_GEM_PWRITE).data_ptr", (Addr)&data->data_ptr, sizeof(data->data_ptr));
-	 /* PRE_MEM_READ("ioctl(DRM_I915_GEM_PWRITE).data_ptr", (Addr)data->data_ptr, data->size);
-	  * NB: the buffer is allowed to contain any amount of uninitialized data (e.g.
-	  * interleaved vertex attributes may have a wide stride with uninitialized data between
-	  * consecutive vertices) */
-      }
-      break;
-   case VKI_DRM_IOCTL_I915_GEM_MMAP_GTT:
-      if (ARG3) {
-         struct vki_drm_i915_gem_mmap_gtt *data = (struct vki_drm_i915_gem_mmap_gtt *)ARG3;
-	 PRE_MEM_READ("ioctl(DRM_I915_GEM_MMAP_GTT).handle", (Addr)&data->handle, sizeof(data->handle));
-         PRE_MEM_WRITE("ioctl(DRM_I915_GEM_MMAP_GTT).offset", (Addr)&data->offset, sizeof(data->offset));
-      }
-      break;
-   case VKI_DRM_IOCTL_I915_GEM_SET_DOMAIN:
-      if (ARG3) {
-         struct vki_drm_i915_gem_set_domain *data = (struct vki_drm_i915_gem_set_domain *)ARG3;
-	 PRE_MEM_READ("ioctl(DRM_I915_GEM_SET_DOMAIN).handle", (Addr)&data->handle, sizeof(data->handle));
-	 PRE_MEM_READ("ioctl(DRM_I915_GEM_SET_DOMAIN).read_domains", (Addr)&data->read_domains, sizeof(data->read_domains));
-	 PRE_MEM_READ("ioctl(DRM_I915_GEM_SET_DOMAIN).write_domain", (Addr)&data->write_domain, sizeof(data->write_domain));
-      }
-      break;
-   case VKI_DRM_IOCTL_I915_GEM_SET_TILING:
-      if (ARG3) {
-         struct vki_drm_i915_gem_set_tiling *data = (struct vki_drm_i915_gem_set_tiling *)ARG3;
-	 PRE_MEM_READ("ioctl(DRM_I915_GEM_SET_TILING).handle", (Addr)&data->handle, sizeof(data->handle));
-         PRE_MEM_READ("ioctl(DRM_I915_GEM_SET_TILING).tiling_mode", (Addr)&data->tiling_mode, sizeof(data->tiling_mode));
-         PRE_MEM_READ("ioctl(DRM_I915_GEM_SET_TILING).stride", (Addr)&data->stride, sizeof(data->stride));
-         PRE_MEM_WRITE("ioctl(DRM_I915_GEM_SET_TILING).swizzle_mode", (Addr)&data->swizzle_mode, sizeof(data->swizzle_mode));
-      }
-      break;
-   case VKI_DRM_IOCTL_I915_GEM_GET_TILING:
-      if (ARG3) {
-         struct vki_drm_i915_gem_get_tiling *data = (struct vki_drm_i915_gem_get_tiling *)ARG3;
-	 PRE_MEM_READ("ioctl(DRM_I915_GEM_GET_TILING).handle", (Addr)&data->handle, sizeof(data->handle));
-	 PRE_MEM_WRITE("ioctl(DRM_I915_GEM_GET_TILING).tiling_mode", (Addr)&data->tiling_mode, sizeof(data->tiling_mode));
-         PRE_MEM_WRITE("ioctl(DRM_I915_GEM_GET_TILING).swizzle_mode", (Addr)&data->swizzle_mode, sizeof(data->swizzle_mode));
-      }
-      break;
-   case VKI_DRM_IOCTL_I915_GEM_GET_APERTURE:
-      if (ARG3) {
-         struct vki_drm_i915_gem_get_aperture *data = (struct vki_drm_i915_gem_get_aperture *)ARG3;
-         PRE_MEM_WRITE("ioctl(DRM_I915_GEM_GET_APERTURE).aper_size", (Addr)&data->aper_size, sizeof(data->aper_size));
-         PRE_MEM_WRITE("ioctl(DRM_I915_GEM_GET_APERTURE).aper_available_size", (Addr)&data->aper_available_size, sizeof(data->aper_available_size));
-      }
       break;
 
    default:
@@ -5448,6 +5402,9 @@ PRE(sys_fcntl64)
    case VKI_F_SETLK64:
    case VKI_F_SETLKW64:
 #  endif
+   case VKI_F_OFD_GETLK:
+   case VKI_F_OFD_SETLK:
+   case VKI_F_OFD_SETLKW:
       PRINT("sys_fcntl64[ARG3=='lock'] ( %ld, %ld, %#lx )", ARG1,ARG2,ARG3);
       PRE_REG_READ3(long, "fcntl64",
                     unsigned int, fd, unsigned int, cmd,
@@ -5512,6 +5469,8 @@ PRE(sys_ioctl)
 {
    *flags |= SfMayBlock;
 
+   ARG2 = (UInt)ARG2;
+
    // We first handle the ones that don't use ARG3 (even as a
    // scalar/non-pointer argument).
    switch (ARG2 /* request */) {
@@ -5519,6 +5478,7 @@ PRE(sys_ioctl)
       /* asm-generic/ioctls.h */
    case VKI_FIOCLEX:
    case VKI_FIONCLEX:
+   case VKI_TIOCNOTTY:
 
       /* linux/soundcard interface (ALSA) */
    case VKI_SNDRV_PCM_IOCTL_HW_FREE:
@@ -5539,11 +5499,15 @@ PRE(sys_ioctl)
       /* SCSI no operand */
    case VKI_SCSI_IOCTL_DOORLOCK:
    case VKI_SCSI_IOCTL_DOORUNLOCK:
+   
+   /* CDROM stuff. */
+   case VKI_CDROM_DISC_STATUS:
 
    /* KVM ioctls that dont check for a numeric value as parameter */
    case VKI_KVM_S390_ENABLE_SIE:
    case VKI_KVM_CREATE_IRQCHIP:
    case VKI_KVM_S390_INITIAL_RESET:
+   case VKI_KVM_KVMCLOCK_CTRL:
 
    /* vhost without parameter */
    case VKI_VHOST_SET_OWNER:
@@ -5555,108 +5519,13 @@ PRE(sys_ioctl)
 
    /* InfiniBand */
    case VKI_IB_USER_MAD_ENABLE_PKEY:
+
+   /* V4L2 */
+   case VKI_V4L2_LOG_STATUS:
       PRINT("sys_ioctl ( %ld, 0x%lx )",ARG1,ARG2);
       PRE_REG_READ2(long, "ioctl",
                     unsigned int, fd, unsigned int, request);
       return;
-
-   case VKI_DRM_IOCTL_VERSION:
-      if (ARG3) {
-         struct vki_drm_version *data = (struct vki_drm_version *)ARG3;
-	 POST_MEM_WRITE((Addr)&data->version_major, sizeof(data->version_major));
-         POST_MEM_WRITE((Addr)&data->version_minor, sizeof(data->version_minor));
-         POST_MEM_WRITE((Addr)&data->version_patchlevel, sizeof(data->version_patchlevel));
-         POST_MEM_WRITE((Addr)&data->name_len, sizeof(data->name_len));
-         POST_MEM_WRITE((Addr)data->name, data->name_len);
-         POST_MEM_WRITE((Addr)&data->date_len, sizeof(data->date_len));
-         POST_MEM_WRITE((Addr)data->date, data->date_len);
-         POST_MEM_WRITE((Addr)&data->desc_len, sizeof(data->desc_len));
-         POST_MEM_WRITE((Addr)data->desc, data->desc_len);
-      }
-      break;
-   case VKI_DRM_IOCTL_GET_UNIQUE:
-      if (ARG3) {
-         struct vki_drm_unique *data = (struct vki_drm_unique *)ARG3;
-	 POST_MEM_WRITE((Addr)data->unique, sizeof(data->unique_len));
-      }
-      break;
-   case VKI_DRM_IOCTL_GET_MAGIC:
-      if (ARG3) {
-         struct vki_drm_auth *data = (struct vki_drm_auth *)ARG3;
-         POST_MEM_WRITE((Addr)&data->magic, sizeof(data->magic));
-      }
-      break;
-   case VKI_DRM_IOCTL_WAIT_VBLANK:
-      if (ARG3) {
-         union vki_drm_wait_vblank *data = (union vki_drm_wait_vblank *)ARG3;
-         POST_MEM_WRITE((Addr)&data->reply, sizeof(data->reply));
-      }
-      break;
-   case VKI_DRM_IOCTL_GEM_FLINK:
-      if (ARG3) {
-         struct vki_drm_gem_flink *data = (struct vki_drm_gem_flink *)ARG3;
-         POST_MEM_WRITE((Addr)&data->name, sizeof(data->name));
-      }
-      break;
-   case VKI_DRM_IOCTL_GEM_OPEN:
-      if (ARG3) {
-         struct vki_drm_gem_open *data = (struct vki_drm_gem_open *)ARG3;
-	 POST_MEM_WRITE((Addr)&data->handle, sizeof(data->handle));
-	 POST_MEM_WRITE((Addr)&data->size, sizeof(data->size));
-      }
-      break;
-   case VKI_DRM_IOCTL_I915_GETPARAM:
-      if (ARG3) {
-         vki_drm_i915_getparam_t *data = (vki_drm_i915_getparam_t *)ARG3;
-	 POST_MEM_WRITE((Addr)data->value, sizeof(int));
-      }
-      break;
-   case VKI_DRM_IOCTL_I915_GEM_BUSY:
-      if (ARG3) {
-         struct vki_drm_i915_gem_busy *data = (struct vki_drm_i915_gem_busy *)ARG3;
-         POST_MEM_WRITE((Addr)&data->busy, sizeof(data->busy));
-      }
-      break;
-   case VKI_DRM_IOCTL_I915_GEM_CREATE:
-      if (ARG3) {
-         struct vki_drm_i915_gem_create *data = (struct vki_drm_i915_gem_create *)ARG3;
-	 POST_MEM_WRITE((Addr)&data->handle, sizeof(data->handle));
-      }
-      break;
-   case VKI_DRM_IOCTL_I915_GEM_PREAD:
-      if (ARG3) {
-         struct vki_drm_i915_gem_pread *data = (struct vki_drm_i915_gem_pread *)ARG3;
-	 POST_MEM_WRITE((Addr)data->data_ptr, data->size);
-      }
-      break;
-   case VKI_DRM_IOCTL_I915_GEM_MMAP_GTT:
-      if (ARG3) {
-         struct vki_drm_i915_gem_mmap_gtt *data = (struct vki_drm_i915_gem_mmap_gtt *)ARG3;
-         POST_MEM_WRITE((Addr)&data->offset, sizeof(data->offset));
-      }
-      break;
-   case VKI_DRM_IOCTL_I915_GEM_SET_TILING:
-      if (ARG3) {
-         struct vki_drm_i915_gem_set_tiling *data = (struct vki_drm_i915_gem_set_tiling *)ARG3;
-         POST_MEM_WRITE((Addr)&data->tiling_mode, sizeof(data->tiling_mode));
-         POST_MEM_WRITE((Addr)&data->stride, sizeof(data->stride));
-         POST_MEM_WRITE((Addr)&data->swizzle_mode, sizeof(data->swizzle_mode));
-      }
-      break;
-   case VKI_DRM_IOCTL_I915_GEM_GET_TILING:
-      if (ARG3) {
-         struct vki_drm_i915_gem_get_tiling *data = (struct vki_drm_i915_gem_get_tiling *)ARG3;
-	 POST_MEM_WRITE((Addr)&data->tiling_mode, sizeof(data->tiling_mode));
-         POST_MEM_WRITE((Addr)&data->swizzle_mode, sizeof(data->swizzle_mode));
-      }
-      break;
-   case VKI_DRM_IOCTL_I915_GEM_GET_APERTURE:
-      if (ARG3) {
-         struct vki_drm_i915_gem_get_aperture *data = (struct vki_drm_i915_gem_get_aperture *)ARG3;
-         POST_MEM_WRITE((Addr)&data->aper_size, sizeof(data->aper_size));
-         POST_MEM_WRITE((Addr)&data->aper_available_size, sizeof(data->aper_available_size));
-      }
-      break;
 
    default:
       PRINT("sys_ioctl ( %ld, 0x%lx, 0x%lx )",ARG1,ARG2,ARG3);
@@ -5669,6 +5538,38 @@ PRE(sys_ioctl)
    // this category).  Nb: some of these may well belong in the
    // doesn't-use-ARG3 switch above.
    switch (ARG2 /* request */) {
+
+   case VKI_ION_IOC_ALLOC: {
+      struct vki_ion_allocation_data* data
+         = (struct vki_ion_allocation_data*)ARG3;
+      PRE_FIELD_READ ("ioctl(ION_IOC_ALLOC).len",          data->len);
+      PRE_FIELD_READ ("ioctl(ION_IOC_ALLOC).align",        data->align);
+      PRE_FIELD_READ ("ioctl(ION_IOC_ALLOC).heap_id_mask", data->heap_id_mask);
+      PRE_FIELD_READ ("ioctl(ION_IOC_ALLOC).flags",        data->flags);
+      PRE_FIELD_WRITE("ioctl(ION_IOC_ALLOC).handle",       data->handle);
+      break;
+   }
+   case VKI_ION_IOC_MAP: {
+      struct vki_ion_fd_data* data = (struct vki_ion_fd_data*)ARG3;
+      PRE_FIELD_READ ("ioctl(ION_IOC_MAP).handle", data->handle);
+      PRE_FIELD_WRITE("ioctl(ION_IOC_MAP).fd",     data->fd);
+      break;
+   }
+   case VKI_ION_IOC_IMPORT: {
+      struct vki_ion_fd_data* data = (struct vki_ion_fd_data*)ARG3;
+      PRE_FIELD_READ ("ioctl(ION_IOC_IMPORT).fd",     data->fd);
+      PRE_FIELD_WRITE("ioctl(ION_IOC_IMPORT).handle", data->handle);
+      break;
+   }
+
+   case VKI_SYNC_IOC_MERGE: {
+      struct vki_sync_merge_data* data = (struct vki_sync_merge_data*)ARG3;
+      PRE_FIELD_READ ("ioctl(SYNC_IOC_MERGE).fd2",   data->fd2);
+      PRE_MEM_RASCIIZ("ioctl(SYNC_IOC_MERGE).name",  (Addr)(&data->name[0]));
+      PRE_FIELD_WRITE("ioctl(SYNC_IOC_MERGE).fence", data->fence);
+      break;
+   }
+
    case VKI_TCSETS:
    case VKI_TCSETSW:
    case VKI_TCSETSF:
@@ -5689,6 +5590,7 @@ PRE(sys_ioctl)
    case VKI_TCXONC:
    case VKI_TCSBRKP:
    case VKI_TCFLSH:
+   case VKI_TIOCSIG:
       /* These just take an int by value */
       break;
    case VKI_TIOCGWINSZ:
@@ -5757,7 +5659,15 @@ PRE(sys_ioctl)
       PRE_MEM_READ( "ioctl(SG_SET_COMMAND_Q)", ARG3, sizeof(int) );
       break;
    case VKI_SG_IO:
-      PRE_MEM_WRITE( "ioctl(SG_IO)", ARG3, sizeof(vki_sg_io_hdr_t) );
+      PRE_MEM_READ( "ioctl(SG_IO)", ARG3, sizeof(vki_sg_io_hdr_t) );
+      {
+         vki_sg_io_hdr_t *sgio = (vki_sg_io_hdr_t*)ARG3;
+         PRE_MEM_READ( "ioctl(SG_IO)", (Addr)sgio->cmdp, sgio->cmd_len );
+         if ( sgio->dxfer_direction == VKI_SG_DXFER_TO_DEV ||
+              sgio->dxfer_direction == VKI_SG_DXFER_TO_FROM_DEV ) {
+            PRE_MEM_READ( "ioctl(SG_IO)", (Addr)sgio->dxferp, sgio->dxfer_len );
+         }
+      }
       break;
    case VKI_SG_GET_SCSI_ID:
       PRE_MEM_WRITE( "ioctl(SG_GET_SCSI_ID)", ARG3, sizeof(vki_sg_scsi_id_t) );
@@ -5857,6 +5767,127 @@ PRE(sys_ioctl)
                      sizeof(((struct vki_ifreq *)ARG3)->vki_ifr_ifindex) );
       PRE_MEM_WRITE( "ioctl(SIOCGIFNAME)", ARG3, sizeof(struct vki_ifreq));
       break;
+   case VKI_SIOCETHTOOL: {       /* ethtool(8) interface         */
+      struct vki_ifreq *ir = (struct vki_ifreq *)ARG3;
+      PRE_MEM_READ( "ioctl(SIOCETHTOOL)", (Addr)ir, sizeof(struct vki_ifreq) );
+      PRE_MEM_RASCIIZ( "ioctl(SIOCETHTOOL)", (Addr)ir->vki_ifr_name );
+      PRE_MEM_READ( "ioctl(SIOCETHTOOL)", (Addr)ir->vki_ifr_data, sizeof(vki_u32) );
+      PRINT("SIOCETHTOOL( 0x%x )", *(vki_u32 *)ir->vki_ifr_data );
+      switch ( *(vki_u32 *)ir->vki_ifr_data ) {
+      case VKI_ETHTOOL_GSET:
+         PRE_MEM_WRITE( "ioctl(SIOCETHTOOL,GSET)",
+                        (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_cmd) );
+         break;
+      case VKI_ETHTOOL_SSET:
+         PRE_MEM_READ( "ioctl(SIOCETHTOOL,SSET)",
+                       (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_cmd) );
+         break;
+      case VKI_ETHTOOL_GDRVINFO:
+         PRE_MEM_WRITE( "ioctl(SIOCETHTOOL,GDRVINFO)",
+                        (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_drvinfo) );
+         break;
+      case VKI_ETHTOOL_GREGS:
+         PRE_MEM_READ( "ioctl(SIOCETHTOOL,GREGS)",
+                       (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_regs) );
+         PRE_MEM_WRITE( "ioctl(SIOCETHTOOL,GREGS)",
+                        (Addr)((struct vki_ethtool_regs *)ir->vki_ifr_data)->data,
+                        ((struct vki_ethtool_regs *)ir->vki_ifr_data)->len );
+         break;
+      case VKI_ETHTOOL_GWOL:
+         PRE_MEM_WRITE( "ioctl(SIOCETHTOOL,GWOL)",
+                        (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_wolinfo) );
+         break;
+      case VKI_ETHTOOL_SWOL:
+         PRE_MEM_READ( "ioctl(SIOCETHTOOL,SWOL)",
+                       (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_wolinfo) );
+         break;
+      case VKI_ETHTOOL_GMSGLVL:
+      case VKI_ETHTOOL_GLINK:
+      case VKI_ETHTOOL_GRXCSUM:
+      case VKI_ETHTOOL_GSG:
+      case VKI_ETHTOOL_GTSO:
+      case VKI_ETHTOOL_GUFO:
+      case VKI_ETHTOOL_GGSO:
+      case VKI_ETHTOOL_GFLAGS:
+      case VKI_ETHTOOL_GGRO:
+         PRE_MEM_WRITE( "ioctl(SIOCETHTOOL,Gvalue)",
+                        (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_value) );
+         break;
+      case VKI_ETHTOOL_SMSGLVL:
+      case VKI_ETHTOOL_SRXCSUM:
+      case VKI_ETHTOOL_SSG:
+      case VKI_ETHTOOL_STSO:
+      case VKI_ETHTOOL_SUFO:
+      case VKI_ETHTOOL_SGSO:
+      case VKI_ETHTOOL_SFLAGS:
+      case VKI_ETHTOOL_SGRO:
+         PRE_MEM_READ( "ioctl(SIOCETHTOOL,Svalue)",
+                       (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_value) );
+         break;
+      case VKI_ETHTOOL_NWAY_RST:
+         break;
+      case VKI_ETHTOOL_GRINGPARAM:
+         PRE_MEM_WRITE( "ioctl(SIOCETHTOOL,GRINGPARAM)",
+                        (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_ringparam) );
+         break;
+      case VKI_ETHTOOL_SRINGPARAM:
+         PRE_MEM_READ( "ioctl(SIOCETHTOOL,SRINGPARAM)",
+                       (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_ringparam) );
+         break;
+      case VKI_ETHTOOL_TEST:
+         PRE_MEM_READ( "ioctl(SIOCETHTOOL,TEST)",
+                       (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_test) );
+         PRE_MEM_WRITE( "ioctl(SIOCETHTOOL,TEST)",
+                        (Addr)((struct vki_ethtool_test *)ir->vki_ifr_data)->data,
+                        ((struct vki_ethtool_test *)ir->vki_ifr_data)->len * sizeof(__vki_u64) );
+         break;
+      case VKI_ETHTOOL_PHYS_ID:
+         break;
+      case VKI_ETHTOOL_GPERMADDR:
+         PRE_MEM_READ( "ioctl(SIOCETHTOOL,GPERMADDR)",
+                       (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_perm_addr) );
+         PRE_MEM_WRITE( "ioctl(SIOCETHTOOL,GPERMADDR)",
+                        (Addr)((struct vki_ethtool_perm_addr *)ir->vki_ifr_data)->data,
+                        ((struct vki_ethtool_perm_addr *)ir->vki_ifr_data)->size );
+         break;
+      case VKI_ETHTOOL_RESET:
+         break;
+      case VKI_ETHTOOL_GSSET_INFO:
+         PRE_MEM_READ( "ioctl(SIOCETHTOOL,GSSET_INFO)",
+                       (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_sset_info) );
+         PRE_MEM_WRITE( "ioctl(SIOCETHTOOL,GSSET_INFO)",
+                        (Addr)((struct vki_ethtool_sset_info *)ir->vki_ifr_data)->data,
+                        __builtin_popcountll(((struct vki_ethtool_sset_info *)ir->vki_ifr_data)->sset_mask) * sizeof(__vki_u32) );
+         break;
+      case VKI_ETHTOOL_GFEATURES:
+         PRE_MEM_READ( "ioctl(SIOCETHTOOL,GFEATURES)",
+                       (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_gfeatures) );
+         PRE_MEM_WRITE( "ioctl(SIOCETHTOOL,GFEATURES)",
+                        (Addr)((struct vki_ethtool_gfeatures *)ir->vki_ifr_data)->features,
+                        ((struct vki_ethtool_gfeatures *)ir->vki_ifr_data)->size * sizeof(struct vki_ethtool_get_features_block) );
+         break;
+      case VKI_ETHTOOL_SFEATURES:
+         PRE_MEM_READ( "ioctl(SIOCETHTOOL,SFEATURES)",
+                       (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_sfeatures) );
+         PRE_MEM_READ( "ioctl(SIOCETHTOOL,SFEATURES)",
+                       (Addr)((struct vki_ethtool_sfeatures *)ir->vki_ifr_data)->features,
+                       ((struct vki_ethtool_sfeatures *)ir->vki_ifr_data)->size * sizeof(struct vki_ethtool_set_features_block) );
+         break;
+      case VKI_ETHTOOL_GCHANNELS:
+         PRE_MEM_WRITE( "ioctl(SIOCETHTOOL,GCHANNELS)",
+                        (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_channels) );
+         break;
+      case VKI_ETHTOOL_SCHANNELS:
+         PRE_MEM_READ( "ioctl(SIOCETHTOOL,SCHANNELS)",
+                       (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_channels) );
+         break;
+      case VKI_ETHTOOL_GET_TS_INFO:
+         PRE_MEM_WRITE( "ioctl(SIOCETHTOOL,GET_TS_INFO)",
+                        (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_ts_info) );
+         break;
+      }
+      break;
+   }
    case VKI_SIOCGMIIPHY:         /* get hardware entry           */
       PRE_MEM_RASCIIZ( "ioctl(SIOCGIFMIIPHY)",
                      (Addr)((struct vki_ifreq *)ARG3)->vki_ifr_name );
@@ -5993,20 +6024,49 @@ PRE(sys_ioctl)
       break;
 
       /* tun/tap related ioctls */
+   case VKI_TUNSETNOCSUM:
+   case VKI_TUNSETDEBUG:
+      break;
    case VKI_TUNSETIFF:
       PRE_MEM_RASCIIZ( "ioctl(TUNSETIFF)",
                      (Addr)((struct vki_ifreq *)ARG3)->vki_ifr_name );
       PRE_MEM_READ( "ioctl(TUNSETIFF)",
                      (Addr)&((struct vki_ifreq *)ARG3)->vki_ifr_flags,
                      sizeof(((struct vki_ifreq *)ARG3)->vki_ifr_flags) );
-      PRE_MEM_WRITE( "ioctl(TUNSETIFF)", ARG3, 
-		     sizeof(struct vki_ifreq));
+      PRE_MEM_WRITE( "ioctl(TUNSETIFF)", ARG3, sizeof(struct vki_ifreq) );
+      break;
+   case VKI_TUNSETPERSIST:
+   case VKI_TUNSETOWNER:
+   case VKI_TUNSETLINK:
+   case VKI_TUNSETGROUP:
+      break;
+   case VKI_TUNGETFEATURES:
+      PRE_MEM_WRITE( "ioctl(TUNGETFEATURES)", ARG3, sizeof(unsigned int) );
       break;
    case VKI_TUNSETOFFLOAD:
-      break; 
+      break;
    case VKI_TUNGETIFF:
-      PRE_MEM_WRITE( "ioctl(TUNGETIFF)", ARG3, 
-		     sizeof(struct vki_ifreq));
+      PRE_MEM_WRITE( "ioctl(TUNGETIFF)", ARG3, sizeof(struct vki_ifreq) );
+      break;
+   case VKI_TUNGETSNDBUF:
+      PRE_MEM_WRITE( "ioctl(TUNGETSNDBUF)", ARG3, sizeof(int) );
+      break;
+   case VKI_TUNSETSNDBUF:
+      PRE_MEM_READ( "ioctl(TUNSETSNDBUF)", ARG3, sizeof(int) );
+      break;
+   case VKI_TUNGETVNETHDRSZ:
+      PRE_MEM_WRITE( "ioctl(TUNGETVNETHDRSZ)", ARG3, sizeof(int) );
+      break;
+   case VKI_TUNSETVNETHDRSZ:
+      PRE_MEM_READ( "ioctl(TUNSETVNETHDRSZ)", ARG3, sizeof(int) );
+      break;
+   case VKI_TUNSETQUEUE:
+      PRE_MEM_READ( "ioctl(TUNSETQUEUE)",
+                     (Addr)&((struct vki_ifreq *)ARG3)->vki_ifr_flags,
+                     sizeof(((struct vki_ifreq *)ARG3)->vki_ifr_flags) );
+      break;
+   case VKI_TUNSETIFINDEX:
+      PRE_MEM_READ( "ioctl(TUNSETIFINDEX)", ARG3, sizeof(unsigned int));
       break;
 
       /* RARP cache control calls. */
@@ -6024,6 +6084,10 @@ PRE(sys_ioctl)
    case VKI_SIOCSPGRP:
       PRE_MEM_READ( "ioctl(SIOCSPGRP)", ARG3, sizeof(int) );
       //tst->sys_flags &= ~SfMayBlock;
+      break;
+
+    case VKI_SIOCATMARK:
+      PRE_MEM_READ( "ioctl(SIOCATMARK)", ARG3, sizeof(int) );
       break;
 
       /* linux/soundcard interface (OSS) */
@@ -6092,6 +6156,39 @@ PRE(sys_ioctl)
    case VKI_SNDRV_PCM_IOCTL_LINK:
       /* these just take an int by value */
       break;
+   case VKI_SNDRV_CTL_IOCTL_PVERSION:
+      PRE_MEM_WRITE( "ioctl(SNDRV_CTL_IOCTL_PVERSION)", (Addr)ARG3, sizeof(int) );
+      break;
+   case VKI_SNDRV_CTL_IOCTL_CARD_INFO:
+      PRE_MEM_WRITE( "ioctl(SNDRV_CTL_IOCTL_CARD_INFO)", (Addr)ARG3, sizeof(struct vki_snd_ctl_card_info) );
+      break;
+   case VKI_SNDRV_CTL_IOCTL_ELEM_LIST: {
+      struct vki_snd_ctl_elem_list *data = (struct vki_snd_ctl_elem_list *)ARG3;
+      PRE_MEM_READ( "ioctl(SNDRV_CTL_IOCTL_ELEM_LIST)", (Addr)&data->offset, sizeof(data->offset) );
+      PRE_MEM_READ( "ioctl(SNDRV_CTL_IOCTL_ELEM_LIST)", (Addr)&data->space, sizeof(data->space) );
+      PRE_MEM_WRITE( "ioctl(SNDRV_CTL_IOCTL_ELEM_LIST)", (Addr)&data->used, sizeof(data->used) );
+      PRE_MEM_WRITE( "ioctl(SNDRV_CTL_IOCTL_ELEM_LIST)", (Addr)&data->count, sizeof(data->count) );
+      PRE_MEM_READ( "ioctl(SNDRV_CTL_IOCTL_ELEM_LIST)", (Addr)&data->pids, sizeof(data->pids) );
+      if (data->pids) {
+         PRE_MEM_WRITE( "ioctl(SNDRV_CTL_IOCTL_ELEM_LIST)", (Addr)data->pids, sizeof(struct vki_snd_ctl_elem_id) * data->space );
+      }
+      break;
+   }
+   case VKI_SNDRV_CTL_IOCTL_TLV_READ: {
+      struct vki_snd_ctl_tlv *data = (struct vki_snd_ctl_tlv *)ARG3;
+      PRE_MEM_READ( "ioctl(SNDRV_CTL_IOCTL_TLV_READ)", (Addr)&data->numid, sizeof(data->numid) );
+      PRE_MEM_READ( "ioctl(SNDRV_CTL_IOCTL_TLV_READ)", (Addr)&data->length, sizeof(data->length) );
+      PRE_MEM_WRITE( "ioctl(SNDRV_CTL_IOCTL_TLV_READ)", (Addr)data->tlv, data->length );
+      break;
+   }
+   case VKI_SNDRV_CTL_IOCTL_TLV_WRITE:
+   case VKI_SNDRV_CTL_IOCTL_TLV_COMMAND: {
+      struct vki_snd_ctl_tlv *data = (struct vki_snd_ctl_tlv *)ARG3;
+      PRE_MEM_READ( "ioctl(SNDRV_CTL_IOCTL_TLV_WRITE)", (Addr)&data->numid, sizeof(data->numid) );
+      PRE_MEM_READ( "ioctl(SNDRV_CTL_IOCTL_TLV_WRITE)", (Addr)&data->length, sizeof(data->length) );
+      PRE_MEM_READ( "ioctl(SNDRV_CTL_IOCTL_TLV_WRITE)", (Addr)data->tlv, data->length );
+      break;
+   }
 
       /* Real Time Clock (/dev/rtc) ioctls */
    case VKI_RTC_UIE_ON:
@@ -6151,6 +6248,9 @@ PRE(sys_ioctl)
       break;
    case VKI_BLKPBSZGET:
       PRE_MEM_WRITE( "ioctl(BLKPBSZGET)", ARG3, sizeof(int));
+      break;
+   case VKI_BLKDISCARDZEROES:
+      PRE_MEM_WRITE( "ioctl(BLKDISCARDZEROES)", ARG3, sizeof(vki_uint));
       break;
 
       /* Hard disks */
@@ -6714,6 +6814,58 @@ PRE(sys_ioctl)
           }
       }
       break;
+   case VKI_I2C_SMBUS:
+       if ( ARG3 ) {
+            struct vki_i2c_smbus_ioctl_data *vkis
+               = (struct vki_i2c_smbus_ioctl_data *) ARG3;
+            PRE_MEM_READ("ioctl(VKI_I2C_SMBUS).i2c_smbus_ioctl_data.read_write",
+                         (Addr)&vkis->read_write, sizeof(vkis->read_write));
+            PRE_MEM_READ("ioctl(VKI_I2C_SMBUS).i2c_smbus_ioctl_data.size",
+                         (Addr)&vkis->size, sizeof(vkis->size));
+            PRE_MEM_READ("ioctl(VKI_I2C_SMBUS).i2c_smbus_ioctl_data.command",
+                         (Addr)&vkis->command, sizeof(vkis->command));
+            /* i2c_smbus_write_quick hides its value in read_write, so
+               this variable can hava a different meaning */
+            /* to make matters worse i2c_smbus_write_byte stores its
+               value in command */
+            if ( ! (((vkis->size == VKI_I2C_SMBUS_QUICK) 
+                     && (vkis->command == VKI_I2C_SMBUS_QUICK)) ||
+                 ((vkis->size == VKI_I2C_SMBUS_BYTE)
+                  && (vkis->read_write == VKI_I2C_SMBUS_WRITE))))  {
+                    /* the rest uses the byte array to store the data,
+                       some the first byte for size */
+                    UInt size;
+                    switch(vkis->size) {
+                        case VKI_I2C_SMBUS_BYTE_DATA:
+                            size = 1;
+                            break;
+                        case VKI_I2C_SMBUS_WORD_DATA:
+                        case VKI_I2C_SMBUS_PROC_CALL:
+                            size = 2;
+                            break;
+                        case VKI_I2C_SMBUS_BLOCK_DATA:
+                        case VKI_I2C_SMBUS_I2C_BLOCK_BROKEN:
+                        case VKI_I2C_SMBUS_BLOCK_PROC_CALL:
+                        case VKI_I2C_SMBUS_I2C_BLOCK_DATA:
+                            size = vkis->data->block[0];
+                            break;
+                        default:
+                            size = 0;
+                    }
+
+                    if ((vkis->read_write == VKI_I2C_SMBUS_READ)
+                        || (vkis->size == VKI_I2C_SMBUS_PROC_CALL)
+                        || (vkis->size == VKI_I2C_SMBUS_BLOCK_PROC_CALL))
+                        PRE_MEM_WRITE("ioctl(VKI_I2C_SMBUS)"
+                                      ".i2c_smbus_ioctl_data.data",
+                                      (Addr)&vkis->data->block[0], size);
+                    else
+                        PRE_MEM_READ("ioctl(VKI_I2C_SMBUS)."
+                                     "i2c_smbus_ioctl_data.data",
+                                     (Addr)&vkis->data->block[0], size);
+            }
+       }
+       break;
 
       /* Wireless extensions ioctls */
    case VKI_SIOCSIWCOMMIT:
@@ -6891,6 +7043,17 @@ PRE(sys_ioctl)
        break;
 #  endif /* defined(VGPV_*_linux_android) */
 
+   case VKI_HCIGETDEVLIST:
+      if (ARG3) {
+         struct vki_hci_dev_list_req* dlr = (struct vki_hci_dev_list_req*)ARG3;
+         PRE_MEM_READ("ioctl(HCIGETDEVLIST)",
+                      (Addr)ARG3, sizeof(struct vki_hci_dev_list_req));
+         PRE_MEM_WRITE("ioctl(HCIGETDEVLIST)",
+                       (Addr)ARG3 + sizeof(struct vki_hci_dev_list_req),
+                       dlr->dev_num * sizeof(struct vki_hci_dev_req));
+      }
+      break;
+      
    case VKI_HCIINQUIRY:
       if (ARG3) {
          struct vki_hci_inquiry_req* ir = (struct vki_hci_inquiry_req*)ARG3;
@@ -6902,11 +7065,157 @@ PRE(sys_ioctl)
       }
       break;
 
+   case VKI_DRM_IOCTL_VERSION:
+      if (ARG3) {
+         struct vki_drm_version *data = (struct vki_drm_version *)ARG3;
+	 PRE_MEM_WRITE("ioctl(DRM_VERSION).version_major", (Addr)&data->version_major, sizeof(data->version_major));
+         PRE_MEM_WRITE("ioctl(DRM_VERSION).version_minor", (Addr)&data->version_minor, sizeof(data->version_minor));
+         PRE_MEM_WRITE("ioctl(DRM_VERSION).version_patchlevel", (Addr)&data->version_patchlevel, sizeof(data->version_patchlevel));
+         PRE_MEM_READ("ioctl(DRM_VERSION).name_len", (Addr)&data->name_len, sizeof(data->name_len));
+         PRE_MEM_READ("ioctl(DRM_VERSION).name", (Addr)&data->name, sizeof(data->name));
+         PRE_MEM_WRITE("ioctl(DRM_VERSION).name", (Addr)data->name, data->name_len);
+         PRE_MEM_READ("ioctl(DRM_VERSION).date_len", (Addr)&data->date_len, sizeof(data->date_len));
+         PRE_MEM_READ("ioctl(DRM_VERSION).date", (Addr)&data->date, sizeof(data->date));
+         PRE_MEM_WRITE("ioctl(DRM_VERSION).date", (Addr)data->date, data->date_len);
+         PRE_MEM_READ("ioctl(DRM_VERSION).desc_len", (Addr)&data->desc_len, sizeof(data->desc_len));
+         PRE_MEM_READ("ioctl(DRM_VERSION).desc", (Addr)&data->desc, sizeof(data->desc));
+         PRE_MEM_WRITE("ioctl(DRM_VERSION).desc", (Addr)data->desc, data->desc_len);
+      }
+      break;
+   case VKI_DRM_IOCTL_GET_UNIQUE:
+      if (ARG3) {
+         struct vki_drm_unique *data = (struct vki_drm_unique *)ARG3;
+	 PRE_MEM_READ("ioctl(DRM_GET_UNIQUE).unique_len", (Addr)&data->unique_len, sizeof(data->unique_len));
+	 PRE_MEM_READ("ioctl(DRM_GET_UNIQUE).unique", (Addr)&data->unique, sizeof(data->unique));
+	 PRE_MEM_WRITE("ioctl(DRM_GET_UNIQUE).unique", (Addr)data->unique, data->unique_len);
+      }
+      break;
+   case VKI_DRM_IOCTL_GET_MAGIC:
+      if (ARG3) {
+         struct vki_drm_auth *data = (struct vki_drm_auth *)ARG3;
+         PRE_MEM_WRITE("ioctl(DRM_GET_MAGIC).magic", (Addr)&data->magic, sizeof(data->magic));
+      }
+      break;
+   case VKI_DRM_IOCTL_WAIT_VBLANK:
+      if (ARG3) {
+         union vki_drm_wait_vblank *data = (union vki_drm_wait_vblank *)ARG3;
+	 PRE_MEM_READ("ioctl(DRM_WAIT_VBLANK).request.type", (Addr)&data->request.type, sizeof(data->request.type));
+	 PRE_MEM_READ("ioctl(DRM_WAIT_VBLANK).request.sequence", (Addr)&data->request.sequence, sizeof(data->request.sequence));
+	 /* XXX: It seems request.signal isn't used */
+         PRE_MEM_WRITE("ioctl(DRM_WAIT_VBLANK).reply", (Addr)&data->reply, sizeof(data->reply));
+      }
+      break;
+   case VKI_DRM_IOCTL_GEM_CLOSE:
+      if (ARG3) {
+         struct vki_drm_gem_close *data = (struct vki_drm_gem_close *)ARG3;
+	 PRE_MEM_READ("ioctl(DRM_GEM_CLOSE).handle", (Addr)&data->handle, sizeof(data->handle));
+      }
+      break;
+   case VKI_DRM_IOCTL_GEM_FLINK:
+      if (ARG3) {
+         struct vki_drm_gem_flink *data = (struct vki_drm_gem_flink *)ARG3;
+	 PRE_MEM_READ("ioctl(DRM_GEM_FLINK).handle", (Addr)&data->handle, sizeof(data->handle));
+         PRE_MEM_WRITE("ioctl(DRM_GEM_FLINK).name", (Addr)&data->name, sizeof(data->name));
+      }
+      break;
+   case VKI_DRM_IOCTL_GEM_OPEN:
+      if (ARG3) {
+         struct vki_drm_gem_open *data = (struct vki_drm_gem_open *)ARG3;
+	 PRE_MEM_READ("ioctl(DRM_GEM_OPEN).name", (Addr)&data->name, sizeof(data->name));
+	 PRE_MEM_WRITE("ioctl(DRM_GEM_OPEN).handle", (Addr)&data->handle, sizeof(data->handle));
+	 PRE_MEM_WRITE("ioctl(DRM_GEM_OPEN).size", (Addr)&data->size, sizeof(data->size));
+      }
+      break;
+   case VKI_DRM_IOCTL_I915_GETPARAM:
+      if (ARG3) {
+         vki_drm_i915_getparam_t *data = (vki_drm_i915_getparam_t *)ARG3;
+	 PRE_MEM_READ("ioctl(DRM_I915_GETPARAM).param", (Addr)&data->param, sizeof(data->param));
+	 PRE_MEM_WRITE("ioctl(DRM_I915_GETPARAM).value", (Addr)data->value, sizeof(int));
+      }
+      break;
+   case VKI_DRM_IOCTL_I915_GEM_BUSY:
+      if (ARG3) {
+         struct vki_drm_i915_gem_busy *data = (struct vki_drm_i915_gem_busy *)ARG3;
+	 PRE_MEM_READ("ioctl(DRM_I915_GEM_BUSY).handle", (Addr)&data->handle, sizeof(data->handle));
+         PRE_MEM_WRITE("ioctl(DRM_I915_GEM_BUSY).busy", (Addr)&data->busy, sizeof(data->busy));
+      }
+      break;
+   case VKI_DRM_IOCTL_I915_GEM_CREATE:
+      if (ARG3) {
+         struct vki_drm_i915_gem_create *data = (struct vki_drm_i915_gem_create *)ARG3;
+	 PRE_MEM_READ("ioctl(DRM_I915_GEM_CREATE).size", (Addr)&data->size, sizeof(data->size));
+	 PRE_MEM_WRITE("ioctl(DRM_I915_GEM_CREATE).handle", (Addr)&data->handle, sizeof(data->handle));
+      }
+      break;
+   case VKI_DRM_IOCTL_I915_GEM_PREAD:
+      if (ARG3) {
+         struct vki_drm_i915_gem_pread *data = (struct vki_drm_i915_gem_pread *)ARG3;
+	 PRE_MEM_READ("ioctl(DRM_I915_GEM_PREAD).handle", (Addr)&data->handle, sizeof(data->handle));
+	 PRE_MEM_READ("ioctl(DRM_I915_GEM_PREAD).offset", (Addr)&data->offset, sizeof(data->offset));
+	 PRE_MEM_READ("ioctl(DRM_I915_GEM_PREAD).size", (Addr)&data->size, sizeof(data->size));
+	 PRE_MEM_READ("ioctl(DRM_I915_GEM_PREAD).data_ptr", (Addr)&data->data_ptr, sizeof(data->data_ptr));
+	 PRE_MEM_WRITE("ioctl(DRM_I915_GEM_PREAD).data_ptr", (Addr)data->data_ptr, data->size);
+      }
+      break;
+   case VKI_DRM_IOCTL_I915_GEM_PWRITE:
+      if (ARG3) {
+         struct vki_drm_i915_gem_pwrite *data = (struct vki_drm_i915_gem_pwrite *)ARG3;
+	 PRE_MEM_READ("ioctl(DRM_I915_GEM_PWRITE).handle", (Addr)&data->handle, sizeof(data->handle));
+	 PRE_MEM_READ("ioctl(DRM_I915_GEM_PWRITE).offset", (Addr)&data->offset, sizeof(data->offset));
+	 PRE_MEM_READ("ioctl(DRM_I915_GEM_PWRITE).size", (Addr)&data->size, sizeof(data->size));
+	 PRE_MEM_READ("ioctl(DRM_I915_GEM_PWRITE).data_ptr", (Addr)&data->data_ptr, sizeof(data->data_ptr));
+	 /* PRE_MEM_READ("ioctl(DRM_I915_GEM_PWRITE).data_ptr", (Addr)data->data_ptr, data->size);
+	  * NB: the buffer is allowed to contain any amount of uninitialized data (e.g.
+	  * interleaved vertex attributes may have a wide stride with uninitialized data between
+	  * consecutive vertices) */
+      }
+      break;
+   case VKI_DRM_IOCTL_I915_GEM_MMAP_GTT:
+      if (ARG3) {
+         struct vki_drm_i915_gem_mmap_gtt *data = (struct vki_drm_i915_gem_mmap_gtt *)ARG3;
+	 PRE_MEM_READ("ioctl(DRM_I915_GEM_MMAP_GTT).handle", (Addr)&data->handle, sizeof(data->handle));
+         PRE_MEM_WRITE("ioctl(DRM_I915_GEM_MMAP_GTT).offset", (Addr)&data->offset, sizeof(data->offset));
+      }
+      break;
+   case VKI_DRM_IOCTL_I915_GEM_SET_DOMAIN:
+      if (ARG3) {
+         struct vki_drm_i915_gem_set_domain *data = (struct vki_drm_i915_gem_set_domain *)ARG3;
+	 PRE_MEM_READ("ioctl(DRM_I915_GEM_SET_DOMAIN).handle", (Addr)&data->handle, sizeof(data->handle));
+	 PRE_MEM_READ("ioctl(DRM_I915_GEM_SET_DOMAIN).read_domains", (Addr)&data->read_domains, sizeof(data->read_domains));
+	 PRE_MEM_READ("ioctl(DRM_I915_GEM_SET_DOMAIN).write_domain", (Addr)&data->write_domain, sizeof(data->write_domain));
+      }
+      break;
+   case VKI_DRM_IOCTL_I915_GEM_SET_TILING:
+      if (ARG3) {
+         struct vki_drm_i915_gem_set_tiling *data = (struct vki_drm_i915_gem_set_tiling *)ARG3;
+	 PRE_MEM_READ("ioctl(DRM_I915_GEM_SET_TILING).handle", (Addr)&data->handle, sizeof(data->handle));
+         PRE_MEM_READ("ioctl(DRM_I915_GEM_SET_TILING).tiling_mode", (Addr)&data->tiling_mode, sizeof(data->tiling_mode));
+         PRE_MEM_READ("ioctl(DRM_I915_GEM_SET_TILING).stride", (Addr)&data->stride, sizeof(data->stride));
+         PRE_MEM_WRITE("ioctl(DRM_I915_GEM_SET_TILING).swizzle_mode", (Addr)&data->swizzle_mode, sizeof(data->swizzle_mode));
+      }
+      break;
+   case VKI_DRM_IOCTL_I915_GEM_GET_TILING:
+      if (ARG3) {
+         struct vki_drm_i915_gem_get_tiling *data = (struct vki_drm_i915_gem_get_tiling *)ARG3;
+	 PRE_MEM_READ("ioctl(DRM_I915_GEM_GET_TILING).handle", (Addr)&data->handle, sizeof(data->handle));
+	 PRE_MEM_WRITE("ioctl(DRM_I915_GEM_GET_TILING).tiling_mode", (Addr)&data->tiling_mode, sizeof(data->tiling_mode));
+         PRE_MEM_WRITE("ioctl(DRM_I915_GEM_GET_TILING).swizzle_mode", (Addr)&data->swizzle_mode, sizeof(data->swizzle_mode));
+      }
+      break;
+   case VKI_DRM_IOCTL_I915_GEM_GET_APERTURE:
+      if (ARG3) {
+         struct vki_drm_i915_gem_get_aperture *data = (struct vki_drm_i915_gem_get_aperture *)ARG3;
+         PRE_MEM_WRITE("ioctl(DRM_I915_GEM_GET_APERTURE).aper_size", (Addr)&data->aper_size, sizeof(data->aper_size));
+         PRE_MEM_WRITE("ioctl(DRM_I915_GEM_GET_APERTURE).aper_available_size", (Addr)&data->aper_available_size, sizeof(data->aper_available_size));
+      }
+      break;
+
    /* KVM ioctls that check for a numeric value as parameter */
    case VKI_KVM_GET_API_VERSION:
    case VKI_KVM_CREATE_VM:
    case VKI_KVM_GET_VCPU_MMAP_SIZE:
    case VKI_KVM_CHECK_EXTENSION:
+   case VKI_KVM_SET_TSS_ADDR:
    case VKI_KVM_CREATE_VCPU:
    case VKI_KVM_RUN:
       break;
@@ -6976,7 +7285,1022 @@ PRE(sys_ioctl)
                     (Addr)args->arr, sizeof(*(args->arr)) * args->num);
       break;
    }
+
+   case VKI_XEN_IOCTL_EVTCHN_BIND_VIRQ: {
+         struct vki_xen_ioctl_evtchn_bind_virq *args =
+            (struct vki_xen_ioctl_evtchn_bind_virq *)(ARG3);
+         PRE_MEM_READ("VKI_XEN_IOCTL_EVTCHN_BIND_VIRQ(virq)",
+                 (Addr)&args->virq, sizeof(args->virq));
+      }
+      break;
+   case VKI_XEN_IOCTL_EVTCHN_BIND_INTERDOMAIN: {
+         struct vki_xen_ioctl_evtchn_bind_interdomain *args =
+            (struct vki_xen_ioctl_evtchn_bind_interdomain *)(ARG3);
+         PRE_MEM_READ("VKI_XEN_IOCTL_EVTCHN_BIND_INTERDOMAIN(remote_domain)",
+                 (Addr)&args->remote_domain, sizeof(args->remote_domain));
+         PRE_MEM_READ("VKI_XEN_IOCTL_EVTCHN_BIND_INTERDOMAIN(remote_port)",
+                 (Addr)&args->remote_port, sizeof(args->remote_port));
+      }
+      break;
+   case VKI_XEN_IOCTL_EVTCHN_BIND_UNBOUND_PORT: {
+         struct vki_xen_ioctl_evtchn_bind_unbound_port *args =
+            (struct vki_xen_ioctl_evtchn_bind_unbound_port *)(ARG3);
+         PRE_MEM_READ("VKI_XEN_IOCTL_EVTCHN_BIND_UNBOUND_PORT(remote_domain)",
+                 (Addr)&args->remote_domain, sizeof(args->remote_domain));
+      }
+      break;
+   case VKI_XEN_IOCTL_EVTCHN_UNBIND: {
+         struct vki_xen_ioctl_evtchn_unbind *args =
+            (struct vki_xen_ioctl_evtchn_unbind *)(ARG3);
+         PRE_MEM_READ("VKI_XEN_IOCTL_EVTCHN_UNBIND(port)",
+                 (Addr)&args->port, sizeof(args->port));
+      }
+      break;
+   case VKI_XEN_IOCTL_EVTCHN_NOTIFY: {
+         struct vki_xen_ioctl_evtchn_notify *args =
+            (struct vki_xen_ioctl_evtchn_notify*)(ARG3);
+         PRE_MEM_READ("VKI_XEN_IOCTL_EVTCHN_notify(port)",
+                 (Addr)&args->port, sizeof(args->port));
+      }
+      break;
+   case VKI_XEN_IOCTL_EVTCHN_RESET:
+      /* No input*/
+      break;
 #endif
+
+   /* Lustre */
+   case VKI_OBD_IOC_FID2PATH: {
+      struct vki_getinfo_fid2path *gf = (struct vki_getinfo_fid2path *)ARG3;
+      PRE_MEM_READ("VKI_OBD_IOC_FID2PATH(args)", ARG3, sizeof(struct vki_getinfo_fid2path));
+      PRE_FIELD_WRITE("VKI_OBD_IOC_FID2PATH(args).gf_recno", gf->gf_recno);
+      PRE_FIELD_WRITE("VKI_OBD_IOC_FID2PATH(args).gf_linkno", gf->gf_linkno);
+      PRE_MEM_WRITE("VKI_OBD_IOC_FID2PATH(args)", (Addr)gf->gf_path, gf->gf_pathlen);
+      break;
+   }
+
+   case VKI_LL_IOC_PATH2FID:
+      PRE_MEM_WRITE("ioctl(VKI_LL_IOC_PATH2FID)", ARG3, sizeof(struct vki_lu_fid));
+      break;
+
+   case VKI_LL_IOC_GETPARENT: {
+      struct vki_getparent *gp = (struct vki_getparent *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_LL_IOC_GETPARENT).gp_linkno", gp->gp_linkno);
+      PRE_FIELD_READ("ioctl(VKI_LL_IOC_GETPARENT).gp_name_size", gp->gp_name_size);
+      PRE_FIELD_WRITE("ioctl(VKI_LL_IOC_GETPARENT).gp_fid", gp->gp_fid);
+      PRE_MEM_WRITE("ioctl(VKI_LL_IOC_GETPARENT).gp_name", (Addr)gp->gp_name, gp->gp_name_size);
+      break;
+   }
+
+   /* V4L2 */
+   case VKI_V4L2_QUERYCAP: {
+      struct vki_v4l2_capability *data = (struct vki_v4l2_capability *)ARG3;
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_QUERYCAP)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_ENUM_FMT: {
+      struct vki_v4l2_fmtdesc *data = (struct vki_v4l2_fmtdesc *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_ENUM_FMT).index", data->index);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_ENUM_FMT).type", data->type);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_ENUM_FMT).flags", data->flags);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_ENUM_FMT).description", data->description);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_ENUM_FMT).pixelformat", data->pixelformat);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_ENUM_FMT).reserved", data->reserved);
+      break;
+   }
+   case VKI_V4L2_G_FMT: {
+      struct vki_v4l2_format *data = (struct vki_v4l2_format *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_G_FMT).type", data->type);
+      switch (data->type) {
+      case VKI_V4L2_BUF_TYPE_VIDEO_CAPTURE:
+      case VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT:
+         PRE_FIELD_READ("ioctl(VKI_V4L2_G_FMT).fmt.pix.priv", data->fmt.pix.priv);
+         PRE_FIELD_WRITE("ioctl(VKI_V4L2_G_FMT).fmt.pix", data->fmt.pix);
+         PRE_MEM_READ("ioctl(VKI_V4L2_G_FMT)",
+               (Addr)&data->type + sizeof(data->type) + sizeof(data->fmt.pix),
+               sizeof(*data) - sizeof(data->type) - sizeof(data->fmt.pix));
+         break;
+      case VKI_V4L2_BUF_TYPE_VBI_CAPTURE:
+      case VKI_V4L2_BUF_TYPE_VBI_OUTPUT:
+         PRE_FIELD_WRITE("ioctl(VKI_V4L2_G_FMT).fmt.vbi", data->fmt.vbi);
+         break;
+      case VKI_V4L2_BUF_TYPE_SLICED_VBI_CAPTURE:
+      case VKI_V4L2_BUF_TYPE_SLICED_VBI_OUTPUT:
+         PRE_FIELD_WRITE("ioctl(VKI_V4L2_G_FMT).fmt.sliced", data->fmt.sliced);
+         break;
+      case VKI_V4L2_BUF_TYPE_VIDEO_OVERLAY:
+      case VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT_OVERLAY:
+         PRE_FIELD_READ("ioctl(VKI_V4L2_G_FMT).fmt.win.clips", data->fmt.win.clips);
+         PRE_FIELD_READ("ioctl(VKI_V4L2_G_FMT).fmt.win.bitmap", data->fmt.win.bitmap);
+         PRE_FIELD_READ("ioctl(VKI_V4L2_G_FMT).fmt.win.clipcount", data->fmt.win.clipcount);
+         if (data->fmt.win.clipcount && data->fmt.win.clips)
+            PRE_MEM_WRITE("ioctl(VKI_V4L2_G_FMT).fmt.win.clips[]",
+                  (Addr)data->fmt.win.clips,
+                  data->fmt.win.clipcount * sizeof(data->fmt.win.clips[0]));
+         PRE_FIELD_WRITE("ioctl(VKI_V4L2_G_FMT).fmt.win.clipcount", data->fmt.win.clipcount);
+         PRE_FIELD_WRITE("ioctl(VKI_V4L2_G_FMT).fmt.win.w", data->fmt.win.w);
+         PRE_FIELD_WRITE("ioctl(VKI_V4L2_G_FMT).fmt.win.field", data->fmt.win.field);
+         PRE_FIELD_WRITE("ioctl(VKI_V4L2_G_FMT).fmt.win.chromakey", data->fmt.win.chromakey);
+         PRE_FIELD_WRITE("ioctl(VKI_V4L2_G_FMT).fmt.win.global_alpha", data->fmt.win.global_alpha);
+         break;
+      case VKI_V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:
+      case VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE:
+         PRE_FIELD_WRITE("ioctl(VKI_V4L2_G_FMT).fmt.pix_mp", data->fmt.pix_mp);
+         break;
+      case VKI_V4L2_BUF_TYPE_SDR_CAPTURE:
+         PRE_FIELD_WRITE("ioctl(VKI_V4L2_G_FMT).fmt.sdr", data->fmt.sdr);
+         break;
+      }
+      break;
+   }
+   case VKI_V4L2_S_FMT: {
+      struct vki_v4l2_format *data = (struct vki_v4l2_format *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_S_FMT).type", data->type);
+      switch (data->type) {
+      case VKI_V4L2_BUF_TYPE_VIDEO_CAPTURE:
+      case VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT:
+         PRE_MEM_READ("ioctl(VKI_V4L2_S_FMT)",
+               (Addr)&data->type + sizeof(data->type),
+               sizeof(*data) - sizeof(data->type));
+         break;
+      case VKI_V4L2_BUF_TYPE_VBI_CAPTURE:
+      case VKI_V4L2_BUF_TYPE_VBI_OUTPUT:
+         PRE_FIELD_READ("ioctl(VKI_V4L2_S_FMT).fmt.vbi", data->fmt.vbi);
+         break;
+      case VKI_V4L2_BUF_TYPE_SLICED_VBI_CAPTURE:
+      case VKI_V4L2_BUF_TYPE_SLICED_VBI_OUTPUT:
+         PRE_FIELD_READ("ioctl(VKI_V4L2_S_FMT).fmt.sliced", data->fmt.sliced);
+         break;
+      case VKI_V4L2_BUF_TYPE_VIDEO_OVERLAY:
+      case VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT_OVERLAY:
+         PRE_FIELD_READ("ioctl(VKI_V4L2_S_FMT).fmt.win", data->fmt.win);
+         if (data->fmt.win.clipcount && data->fmt.win.clips)
+            PRE_MEM_READ("ioctl(VKI_V4L2_S_FMT).fmt.win.clips[]",
+                  (Addr)data->fmt.win.clips,
+                  data->fmt.win.clipcount * sizeof(data->fmt.win.clips[0]));
+         if (data->fmt.win.bitmap)
+            PRE_MEM_READ("ioctl(VKI_V4L2_S_FMT).fmt.win.bitmap[]",
+                  (Addr)data->fmt.win.bitmap,
+                  data->fmt.win.w.height * ((data->fmt.win.w.width + 7) / 8));
+         break;
+      case VKI_V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:
+      case VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE:
+         PRE_FIELD_READ("ioctl(VKI_V4L2_S_FMT).fmt.pix_mp", data->fmt.pix_mp);
+         break;
+      case VKI_V4L2_BUF_TYPE_SDR_CAPTURE:
+         PRE_FIELD_READ("ioctl(VKI_V4L2_S_FMT).fmt.sdr", data->fmt.sdr);
+         break;
+      }
+      break;
+   }
+   case VKI_V4L2_TRY_FMT: {
+      struct vki_v4l2_format *data = (struct vki_v4l2_format *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_TRY_FMT).type", data->type);
+      switch (data->type) {
+      case VKI_V4L2_BUF_TYPE_VIDEO_CAPTURE:
+      case VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT:
+         PRE_MEM_READ("ioctl(VKI_V4L2_TRY_FMT)",
+               (Addr)&data->type + sizeof(data->type),
+               sizeof(*data) - sizeof(data->type));
+         break;
+      case VKI_V4L2_BUF_TYPE_VBI_CAPTURE:
+      case VKI_V4L2_BUF_TYPE_VBI_OUTPUT:
+         PRE_FIELD_READ("ioctl(VKI_V4L2_TRY_FMT).fmt.vbi", data->fmt.vbi);
+         break;
+      case VKI_V4L2_BUF_TYPE_SLICED_VBI_CAPTURE:
+      case VKI_V4L2_BUF_TYPE_SLICED_VBI_OUTPUT:
+         PRE_FIELD_READ("ioctl(VKI_V4L2_TRY_FMT).fmt.sliced", data->fmt.sliced);
+         break;
+      case VKI_V4L2_BUF_TYPE_VIDEO_OVERLAY:
+      case VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT_OVERLAY:
+         PRE_FIELD_READ("ioctl(VKI_V4L2_TRY_FMT).fmt.win", data->fmt.win);
+         if (data->fmt.win.clipcount && data->fmt.win.clips)
+            PRE_MEM_READ("ioctl(VKI_V4L2_TRY_FMT).fmt.win.clips[]",
+                  (Addr)data->fmt.win.clips,
+                  data->fmt.win.clipcount * sizeof(data->fmt.win.clips[0]));
+         if (data->fmt.win.bitmap)
+            PRE_MEM_READ("ioctl(VKI_V4L2_TRY_FMT).fmt.win.bitmap[]",
+                  (Addr)data->fmt.win.bitmap,
+                  data->fmt.win.w.height * ((data->fmt.win.w.width + 7) / 8));
+         break;
+      case VKI_V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:
+      case VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE:
+         PRE_FIELD_READ("ioctl(VKI_V4L2_TRY_FMT).fmt.pix_mp", data->fmt.pix_mp);
+         break;
+      case VKI_V4L2_BUF_TYPE_SDR_CAPTURE:
+         PRE_FIELD_READ("ioctl(VKI_V4L2_TRY_FMT).fmt.sdr", data->fmt.sdr);
+         break;
+      }
+      break;
+   }
+   case VKI_V4L2_REQBUFS: {
+      struct vki_v4l2_requestbuffers *data = (struct vki_v4l2_requestbuffers *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_REQBUFS)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_QUERYBUF: {
+      struct vki_v4l2_buffer *data = (struct vki_v4l2_buffer *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_QUERYBUF).type", data->type);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_QUERYBUF).index", data->index);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_QUERYBUF).reserved", data->reserved);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_QUERYBUF).reserved2", data->reserved2);
+      if (data->type == VKI_V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ||
+            data->type == VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
+         unsigned i;
+
+         PRE_FIELD_READ("ioctl(VKI_V4L2_QUERYBUF).length", data->length);
+         PRE_FIELD_READ("ioctl(VKI_V4L2_QUERYBUF).m.planes", data->m.planes);
+         for (i = 0; i < data->length; i++) {
+            PRE_FIELD_WRITE("ioctl(VKI_V4L2_QUERYBUF).m.planes[].bytesused", data->m.planes[i].bytesused);
+            PRE_FIELD_WRITE("ioctl(VKI_V4L2_QUERYBUF).m.planes[].length", data->m.planes[i].length);
+            PRE_FIELD_WRITE("ioctl(VKI_V4L2_QUERYBUF).m.planes[].m", data->m.planes[i].m);
+            PRE_FIELD_WRITE("ioctl(VKI_V4L2_QUERYBUF).m.planes[].data_offset", data->m.planes[i].data_offset);
+            PRE_FIELD_WRITE("ioctl(VKI_V4L2_QUERYBUF).m.planes[].reserved", data->m.planes[i].reserved);
+         }
+      } else {
+         PRE_FIELD_WRITE("ioctl(VKI_V4L2_QUERYBUF).m", data->m);
+         PRE_FIELD_WRITE("ioctl(VKI_V4L2_QUERYBUF).length", data->length);
+      }
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_QUERYBUF).bytesused", data->bytesused);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_QUERYBUF).flags", data->flags);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_QUERYBUF).field", data->field);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_QUERYBUF).timestamp", data->timestamp);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_QUERYBUF).timecode", data->timecode);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_QUERYBUF).sequence", data->sequence);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_QUERYBUF).memory", data->memory);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_QUERYBUF).sequence", data->sequence);
+      break;
+   }
+   case VKI_V4L2_G_FBUF: {
+      struct vki_v4l2_framebuffer *data = (struct vki_v4l2_framebuffer *)ARG3;
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_G_FBUF)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_S_FBUF: {
+      struct vki_v4l2_framebuffer *data = (struct vki_v4l2_framebuffer *)ARG3;
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_S_FBUF).capability", data->capability);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_S_FBUF).flags", data->flags);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_S_FBUF).base", data->base);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_S_FBUF).fmt", data->fmt);
+      break;
+   }
+   case VKI_V4L2_OVERLAY: {
+      int *data = (int *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_OVERLAY)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_QBUF: {
+      struct vki_v4l2_buffer *data = (struct vki_v4l2_buffer *)ARG3;
+      int is_output = data->type == VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT ||
+         data->type == VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ||
+         data->type == VKI_V4L2_BUF_TYPE_VBI_OUTPUT ||
+         data->type == VKI_V4L2_BUF_TYPE_SLICED_VBI_OUTPUT;
+
+      PRE_FIELD_READ("ioctl(VKI_V4L2_QBUF).type", data->type);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_QBUF).index", data->index);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_QBUF).flags", data->flags);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_QBUF).memory", data->memory);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_QBUF).reserved", data->reserved);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_QBUF).reserved2", data->reserved2);
+      if (is_output) {
+         PRE_FIELD_READ("ioctl(VKI_V4L2_QBUF).bytesused", data->bytesused);
+         PRE_FIELD_READ("ioctl(VKI_V4L2_QBUF).field", data->field);
+      }
+      if (data->type == VKI_V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ||
+            data->type == VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
+         unsigned i;
+
+         PRE_FIELD_READ("ioctl(VKI_V4L2_QBUF).length", data->length);
+         PRE_FIELD_READ("ioctl(VKI_V4L2_QBUF).m.planes", data->m.planes);
+         for (i = 0; i < data->length; i++) {
+            if (is_output) {
+               PRE_FIELD_READ("ioctl(VKI_V4L2_QBUF).m.planes[].bytesused", data->m.planes[i].bytesused);
+               PRE_FIELD_READ("ioctl(VKI_V4L2_QBUF).m.planes[].data_offset", data->m.planes[i].data_offset);
+            }
+            if (data->memory == VKI_V4L2_MEMORY_MMAP)
+               PRE_FIELD_WRITE("ioctl(VKI_V4L2_QBUF).m.planes[].m", data->m.planes[i].m);
+            else if (data->memory == VKI_V4L2_MEMORY_DMABUF)
+               PRE_FIELD_READ("ioctl(VKI_V4L2_QBUF).m.planes[].m.fd", data->m.planes[i].m.fd);
+            else
+               PRE_FIELD_READ("ioctl(VKI_V4L2_QBUF).m.planes[].m", data->m.planes[i].m);
+            PRE_FIELD_READ("ioctl(VKI_V4L2_QBUF).m.planes[].reserved", data->m.planes[i].reserved);
+         }
+      } else {
+         if (data->memory == VKI_V4L2_MEMORY_MMAP)
+            PRE_FIELD_WRITE("ioctl(VKI_V4L2_QBUF).m", data->m);
+         else if (data->memory == VKI_V4L2_MEMORY_DMABUF)
+            PRE_FIELD_READ("ioctl(VKI_V4L2_QBUF).m.fd", data->m.fd);
+         else
+            PRE_FIELD_READ("ioctl(VKI_V4L2_QBUF).m", data->m);
+         if (is_output) {
+            PRE_FIELD_READ("ioctl(VKI_V4L2_QBUF).bytesused", data->bytesused);
+            PRE_FIELD_READ("ioctl(VKI_V4L2_QBUF).field", data->field);
+         }
+      }
+      if (is_output && (data->flags & VKI_V4L2_BUF_FLAG_TIMESTAMP_MASK) == VKI_V4L2_BUF_FLAG_TIMESTAMP_COPY) {
+         PRE_FIELD_READ("ioctl(VKI_V4L2_QBUF).timestamp", data->timestamp);
+         PRE_FIELD_READ("ioctl(VKI_V4L2_QBUF).timecode", data->timecode);
+      }
+      break;
+   }
+   case VKI_V4L2_EXPBUF: {
+      struct vki_v4l2_exportbuffer *data = (struct vki_v4l2_exportbuffer *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_EXPBUF).type", data->type);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_EXPBUF).index", data->index);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_EXPBUF).plane", data->plane);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_EXPBUF).flags", data->flags);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_EXPBUF).fd", data->fd);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_EXPBUF).reserved", data->reserved);
+      break;
+   }
+   case VKI_V4L2_DQBUF: {
+      struct vki_v4l2_buffer *data = (struct vki_v4l2_buffer *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_DQBUF).type", data->type);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_DQBUF).index", data->index);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_DQBUF).memory", data->memory);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_DQBUF).reserved", data->reserved);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_DQBUF).reserved2", data->reserved2);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_DQBUF).bytesused", data->bytesused);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_DQBUF).field", data->field);
+      if (data->type == VKI_V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ||
+            data->type == VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
+         unsigned i;
+
+         PRE_FIELD_READ("ioctl(VKI_V4L2_DQBUF).length", data->length);
+         PRE_FIELD_READ("ioctl(VKI_V4L2_DQBUF).m.planes", data->m.planes);
+         for (i = 0; i < data->length; i++) {
+            PRE_FIELD_WRITE("ioctl(VKI_V4L2_DQBUF).m.planes[].bytesused", data->m.planes[i].bytesused);
+            PRE_FIELD_WRITE("ioctl(VKI_V4L2_DQBUF).m.planes[].data_offset", data->m.planes[i].data_offset);
+            PRE_FIELD_WRITE("ioctl(VKI_V4L2_DQBUF).m.planes[].length", data->m.planes[i].length);
+            PRE_FIELD_WRITE("ioctl(VKI_V4L2_DQBUF).m.planes[].m", data->m.planes[i].m);
+            PRE_FIELD_READ("ioctl(VKI_V4L2_DQBUF).m.planes[].reserved", data->m.planes[i].reserved);
+         }
+      } else {
+         PRE_FIELD_WRITE("ioctl(VKI_V4L2_DQBUF).m", data->m);
+         PRE_FIELD_WRITE("ioctl(VKI_V4L2_DQBUF).length", data->length);
+         PRE_FIELD_WRITE("ioctl(VKI_V4L2_DQBUF).bytesused", data->bytesused);
+         PRE_FIELD_WRITE("ioctl(VKI_V4L2_DQBUF).field", data->field);
+      }
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_DQBUF).timestamp", data->timestamp);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_DQBUF).timecode", data->timecode);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_DQBUF).sequence", data->sequence);
+      break;
+   }
+   case VKI_V4L2_STREAMON: {
+      int *data = (int *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_STREAMON)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_STREAMOFF: {
+      int *data = (int *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_STREAMOFF)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_G_PARM: {
+      struct vki_v4l2_streamparm *data = (struct vki_v4l2_streamparm *)ARG3;
+      int is_output = data->type == VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT ||
+         data->type == VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ||
+         data->type == VKI_V4L2_BUF_TYPE_VBI_OUTPUT ||
+         data->type == VKI_V4L2_BUF_TYPE_SLICED_VBI_OUTPUT;
+
+      PRE_FIELD_READ("ioctl(VKI_V4L2_G_PARM).type", data->type);
+      if (is_output) {
+         PRE_MEM_WRITE("ioctl(VKI_V4L2_G_PARM)", (Addr)&data->parm.output,
+            sizeof(data->parm.output) - sizeof(data->parm.output.reserved));
+         PRE_FIELD_READ("ioctl(VKI_V4L2_G_PARM).parm.output.reserved", data->parm.output.reserved);
+      } else {
+         PRE_MEM_WRITE("ioctl(VKI_V4L2_G_PARM)", (Addr)&data->parm.capture,
+            sizeof(data->parm.capture) - sizeof(data->parm.capture.reserved));
+         PRE_FIELD_READ("ioctl(VKI_V4L2_G_PARM).parm.capture.reserved", data->parm.capture.reserved);
+      }
+      break;
+   }
+   case VKI_V4L2_S_PARM: {
+      struct vki_v4l2_streamparm *data = (struct vki_v4l2_streamparm *)ARG3;
+      int is_output = data->type == VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT ||
+         data->type == VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ||
+         data->type == VKI_V4L2_BUF_TYPE_VBI_OUTPUT ||
+         data->type == VKI_V4L2_BUF_TYPE_SLICED_VBI_OUTPUT;
+
+      PRE_FIELD_READ("ioctl(VKI_V4L2_S_PARM).type", data->type);
+      if (is_output)
+         PRE_FIELD_READ("ioctl(VKI_V4L2_S_PARM).parm.output", data->parm.output);
+      else
+         PRE_FIELD_READ("ioctl(VKI_V4L2_S_PARM).parm.capture", data->parm.capture);
+      break;
+   }
+   case VKI_V4L2_G_STD: {
+      vki_v4l2_std_id *data = (vki_v4l2_std_id *)ARG3;
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_G_STD)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_S_STD: {
+      vki_v4l2_std_id *data = (vki_v4l2_std_id *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_S_STD)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_ENUMSTD: {
+      struct vki_v4l2_standard *data = (struct vki_v4l2_standard *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_ENUMSTD).index", data->index);
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_ENUMSTD)", (Addr)&data->id, sizeof(*data) - sizeof(data->index));
+      break;
+   }
+   case VKI_V4L2_ENUMINPUT: {
+      struct vki_v4l2_input *data = (struct vki_v4l2_input *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_ENUMINPUT).index", data->index);
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_ENUMINPUT)", (Addr)data->name, sizeof(*data) - sizeof(data->index));
+      break;
+   }
+   case VKI_V4L2_G_CTRL: {
+      struct vki_v4l2_control *data = (struct vki_v4l2_control *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_G_CTRL).id", data->id);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_G_CTRL).value", data->value);
+      break;
+   }
+   case VKI_V4L2_S_CTRL: {
+      struct vki_v4l2_control *data = (struct vki_v4l2_control *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_S_CTRL)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_G_TUNER: {
+      struct vki_v4l2_tuner *data = (struct vki_v4l2_tuner *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_G_TUNER).index", data->index);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_G_TUNER).reserved", data->reserved);
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_G_TUNER)", (Addr)data->name,
+            sizeof(*data) - sizeof(data->index) - sizeof(data->reserved));
+      break;
+   }
+   case VKI_V4L2_S_TUNER: {
+      struct vki_v4l2_tuner *data = (struct vki_v4l2_tuner *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_S_TUNER).index", data->index);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_S_TUNER).audmode", data->audmode);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_S_TUNER).reserved", data->reserved);
+      break;
+   }
+   case VKI_V4L2_G_AUDIO: {
+      struct vki_v4l2_audio *data = (struct vki_v4l2_audio *)ARG3;
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_G_AUDIO)", (Addr)data,
+            sizeof(*data) - sizeof(data->reserved));
+      PRE_FIELD_READ("ioctl(VKI_V4L2_G_AUDIO).reserved", data->reserved);
+      break;
+   }
+   case VKI_V4L2_S_AUDIO: {
+      struct vki_v4l2_audio *data = (struct vki_v4l2_audio *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_S_AUDIO).index", data->index);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_S_AUDIO).mode", data->mode);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_S_AUDIO).reserved", data->reserved);
+      break;
+   }
+   case VKI_V4L2_QUERYCTRL: {
+      struct vki_v4l2_queryctrl *data = (struct vki_v4l2_queryctrl *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_QUERYCTRL).id", data->id);
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_QUERYCTRL)", (Addr)&data->type,
+            sizeof(*data) - sizeof(data->id));
+      break;
+   }
+   case VKI_V4L2_QUERYMENU: {
+      struct vki_v4l2_querymenu *data = (struct vki_v4l2_querymenu *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_QUERYMENU).id", data->id);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_QUERYMENU).index", data->index);
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_QUERYMENU)", (Addr)data->name,
+            sizeof(*data) - sizeof(data->id) - sizeof(data->index));
+      break;
+   }
+   case VKI_V4L2_G_INPUT: {
+      int *data = (int *)ARG3;
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_G_INPUT)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_S_INPUT: {
+      int *data = (int *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_S_INPUT)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_G_EDID: {
+      struct vki_v4l2_edid *data = (struct vki_v4l2_edid *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_G_EDID)", (Addr)data, sizeof(*data));
+      if (data->blocks && data->edid)
+         PRE_MEM_WRITE("ioctl(VKI_V4L2_G_EDID)", (Addr)data->edid, data->blocks * 128);
+      break;
+   }
+   case VKI_V4L2_S_EDID: {
+      struct vki_v4l2_edid *data = (struct vki_v4l2_edid *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_S_EDID)", (Addr)data, sizeof(*data));
+      if (data->blocks && data->edid)
+         PRE_MEM_READ("ioctl(VKI_V4L2_S_EDID)", (Addr)data->edid, data->blocks * 128);
+      break;
+   }
+   case VKI_V4L2_G_OUTPUT: {
+      int *data = (int *)ARG3;
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_G_OUTPUT)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_S_OUTPUT: {
+      int *data = (int *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_S_OUTPUT)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_ENUMOUTPUT: {
+      struct vki_v4l2_output *data = (struct vki_v4l2_output *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_ENUMOUTPUT).index", data->index);
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_ENUMOUTPUT)", (Addr)data->name, sizeof(*data) - sizeof(data->index));
+      break;
+   }
+   case VKI_V4L2_G_AUDOUT: {
+      struct vki_v4l2_audioout *data = (struct vki_v4l2_audioout *)ARG3;
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_G_AUDOUT)", (Addr)data,
+            sizeof(*data) - sizeof(data->reserved));
+      PRE_FIELD_READ("ioctl(VKI_V4L2_G_AUDOUT).reserved", data->reserved);
+      break;
+   }
+   case VKI_V4L2_S_AUDOUT: {
+      struct vki_v4l2_audioout *data = (struct vki_v4l2_audioout *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_S_AUDOUT).index", data->index);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_S_AUDOUT).reserved", data->reserved);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_S_AUDOUT).mode", data->mode);
+      break;
+   }
+   case VKI_V4L2_G_MODULATOR: {
+      struct vki_v4l2_modulator *data = (struct vki_v4l2_modulator *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_G_MODULATOR).index", data->index);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_G_MODULATOR).reserved", data->reserved);
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_G_MODULATOR)", (Addr)data->name,
+            sizeof(*data) - sizeof(data->index) - sizeof(data->reserved));
+      break;
+   }
+   case VKI_V4L2_S_MODULATOR: {
+      struct vki_v4l2_modulator *data = (struct vki_v4l2_modulator *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_S_MODULATOR).index", data->index);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_S_MODULATOR).txsubchans", data->txsubchans);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_S_MODULATOR).reserved", data->reserved);
+      break;
+   }
+   case VKI_V4L2_G_FREQUENCY: {
+      struct vki_v4l2_frequency *data = (struct vki_v4l2_frequency *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_G_FREQUENCY).tuner", data->tuner);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_G_FREQUENCY).reserved", data->reserved);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_G_FREQUENCY).type", data->type);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_G_FREQUENCY).frequency", data->frequency);
+      break;
+   }
+   case VKI_V4L2_S_FREQUENCY: {
+      struct vki_v4l2_frequency *data = (struct vki_v4l2_frequency *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_S_FREQUENCY)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_CROPCAP: {
+      struct vki_v4l2_cropcap *data = (struct vki_v4l2_cropcap *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_CROPCAP)", data->type);
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_CROPCAP)", (Addr)&data->bounds, sizeof(*data) - sizeof(data->type));
+      break;
+   }
+   case VKI_V4L2_G_CROP: {
+      struct vki_v4l2_crop *data = (struct vki_v4l2_crop *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_G_CROP).type", data->type);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_G_CROP).c", data->c);
+      break;
+   }
+   case VKI_V4L2_S_CROP: {
+      struct vki_v4l2_crop *data = (struct vki_v4l2_crop *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_S_CROP)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_G_JPEGCOMP: {
+      struct vki_v4l2_jpegcompression *data = (struct vki_v4l2_jpegcompression *)ARG3;
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_G_JPEGCOMP)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_S_JPEGCOMP: {
+      struct vki_v4l2_jpegcompression *data = (struct vki_v4l2_jpegcompression *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_S_JPEGCOMP)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_QUERYSTD: {
+      vki_v4l2_std_id *data = (vki_v4l2_std_id *)ARG3;
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_QUERYSTD)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_ENUMAUDIO: {
+      struct vki_v4l2_audio *data = (struct vki_v4l2_audio *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_ENUMAUDIO).index", data->index);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_ENUMAUDIO).reserved", data->reserved);
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_ENUMAUDIO)", (Addr)data->name,
+            sizeof(*data) - sizeof(data->index) - sizeof(data->reserved));
+      break;
+   }
+   case VKI_V4L2_ENUMAUDOUT: {
+      struct vki_v4l2_audioout *data = (struct vki_v4l2_audioout *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_ENUMAUDOUT).index", data->index);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_ENUMAUDOUT).reserved", data->reserved);
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_ENUMAUDOUT)", (Addr)data->name,
+            sizeof(*data) - sizeof(data->index) - sizeof(data->reserved));
+      break;
+   }
+   case VKI_V4L2_G_PRIORITY: {
+      __vki_u32 *data = (__vki_u32 *)ARG3;
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_G_PRIORITY)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_S_PRIORITY: {
+      __vki_u32 *data = (__vki_u32 *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_S_PRIORITY)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_G_SLICED_VBI_CAP: {
+      struct vki_v4l2_sliced_vbi_cap *data = (struct vki_v4l2_sliced_vbi_cap *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_G_SLICED_VBI_CAP).type", data->type);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_G_SLICED_VBI_CAP).reserved", data->reserved);
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_G_SLICED_VBI_CAP)", (Addr)data,
+            sizeof(*data) - sizeof(data->type) - sizeof(data->reserved));
+      break;
+   }
+   case VKI_V4L2_G_EXT_CTRLS: {
+      struct vki_v4l2_ext_controls *data = (struct vki_v4l2_ext_controls *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_G_EXT_CTRLS).ctrl_class", data->ctrl_class);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_G_EXT_CTRLS).count", data->count);
+      if (data->count) {
+         unsigned i;
+
+         PRE_FIELD_READ("ioctl(VKI_V4L2_G_EXT_CTRLS).controls", data->controls);
+         for (i = 0; i < data->count; i++) {
+            PRE_FIELD_READ("ioctl(VKI_V4L2_G_EXT_CTRLS).controls[].id", data->controls[i].id);
+            PRE_FIELD_READ("ioctl(VKI_V4L2_G_EXT_CTRLS).controls[].size", data->controls[i].size);
+            PRE_FIELD_READ("ioctl(VKI_V4L2_G_EXT_CTRLS).controls[].reserved2", data->controls[i].reserved2);
+            if (data->controls[i].size) {
+               PRE_FIELD_READ("ioctl(VKI_V4L2_G_EXT_CTRLS).controls[].ptr", data->controls[i].ptr);
+               PRE_MEM_WRITE("ioctl(VKI_V4L2_G_EXT_CTRLS).controls[].ptr[]",
+                     (Addr)data->controls[i].ptr, data->controls[i].size);
+            } else {
+               PRE_FIELD_WRITE("ioctl(VKI_V4L2_G_EXT_CTRLS).controls[].value64",
+                     data->controls[i].value64);
+            }
+         }
+      }
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_G_EXT_CTRLS).error_idx", data->error_idx);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_G_EXT_CTRLS).reserved", data->reserved);
+      break;
+   }
+   case VKI_V4L2_S_EXT_CTRLS: {
+      struct vki_v4l2_ext_controls *data = (struct vki_v4l2_ext_controls *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_S_EXT_CTRLS).ctrl_class", data->ctrl_class);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_S_EXT_CTRLS).count", data->count);
+      if (data->count) {
+         unsigned i;
+
+         PRE_FIELD_READ("ioctl(VKI_V4L2_S_EXT_CTRLS).controls", data->controls);
+         PRE_MEM_READ("ioctl(VKI_V4L2_S_EXT_CTRLS)", (Addr)data->controls,
+               data->count * sizeof(data->controls[0]));
+         for (i = 0; i < data->count; i++) {
+            if (data->controls[i].size) {
+               PRE_MEM_READ("ioctl(VKI_V4L2_S_EXT_CTRLS).controls[].ptr[]",
+                     (Addr)data->controls[i].ptr, data->controls[i].size);
+            }
+         }
+      }
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_S_EXT_CTRLS).error_idx", data->error_idx);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_S_EXT_CTRLS).reserved", data->reserved);
+      break;
+   }
+   case VKI_V4L2_TRY_EXT_CTRLS: {
+      struct vki_v4l2_ext_controls *data = (struct vki_v4l2_ext_controls *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_TRY_EXT_CTRLS).ctrl_class", data->ctrl_class);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_TRY_EXT_CTRLS).count", data->count);
+      if (data->count) {
+         unsigned i;
+
+         PRE_FIELD_READ("ioctl(VKI_V4L2_TRY_EXT_CTRLS).controls", data->controls);
+         PRE_MEM_READ("ioctl(VKI_V4L2_TRY_EXT_CTRLS)", (Addr)data->controls,
+               data->count * sizeof(data->controls[0]));
+         for (i = 0; i < data->count; i++) {
+            if (data->controls[i].size) {
+               PRE_MEM_READ("ioctl(VKI_V4L2_TRY_EXT_CTRLS).controls[].ptr[]",
+                     (Addr)data->controls[i].ptr, data->controls[i].size);
+            }
+         }
+      }
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_TRY_EXT_CTRLS).error_idx", data->error_idx);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_TRY_EXT_CTRLS).reserved", data->reserved);
+      break;
+   }
+   case VKI_V4L2_ENUM_FRAMESIZES: {
+      struct vki_v4l2_frmsizeenum *data = (struct vki_v4l2_frmsizeenum *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_ENUM_FRAMESIZES).index", data->index);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_ENUM_FRAMESIZES).pixel_format", data->pixel_format);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_ENUM_FRAMESIZES).reserved", data->reserved);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_ENUM_FRAMESIZES).type", data->type);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_ENUM_FRAMESIZES).stepwise", data->stepwise);
+      break;
+   }
+   case VKI_V4L2_ENUM_FRAMEINTERVALS: {
+      struct vki_v4l2_frmivalenum *data = (struct vki_v4l2_frmivalenum *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_ENUM_FRAMEINTERVALS).index", data->index);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_ENUM_FRAMEINTERVALS).pixel_format", data->pixel_format);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_ENUM_FRAMEINTERVALS).width", data->width);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_ENUM_FRAMEINTERVALS).height", data->height);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_ENUM_FRAMEINTERVALS).reserved", data->reserved);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_ENUM_FRAMEINTERVALS).type", data->type);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_ENUM_FRAMEINTERVALS).stepwise", data->stepwise);
+      break;
+   }
+   case VKI_V4L2_G_ENC_INDEX: {
+      struct vki_v4l2_enc_idx *data = (struct vki_v4l2_enc_idx *)ARG3;
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_G_ENC_INDEX)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_ENCODER_CMD: {
+      struct vki_v4l2_encoder_cmd *data = (struct vki_v4l2_encoder_cmd *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_ENCODER_CMD)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_TRY_ENCODER_CMD: {
+      struct vki_v4l2_encoder_cmd *data = (struct vki_v4l2_encoder_cmd *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_TRY_ENCODER_CMD)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_DBG_S_REGISTER: {
+      struct vki_v4l2_dbg_register *data = (struct vki_v4l2_dbg_register *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_DBG_S_REGISTER).match.type", data->match.type);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_DBG_S_REGISTER).match.addr", data->match.addr);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_DBG_S_REGISTER).reg", data->reg);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_DBG_S_REGISTER).val", data->val);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_DBG_S_REGISTER).size", data->size);
+      break;
+   }
+   case VKI_V4L2_DBG_G_REGISTER: {
+      struct vki_v4l2_dbg_register *data = (struct vki_v4l2_dbg_register *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_DBG_G_REGISTER).match.type", data->match.type);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_DBG_G_REGISTER).match.addr", data->match.addr);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_DBG_G_REGISTER).reg", data->reg);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_DBG_G_REGISTER).val", data->val);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_DBG_G_REGISTER).size", data->size);
+      break;
+   }
+   case VKI_V4L2_S_HW_FREQ_SEEK: {
+      struct vki_v4l2_hw_freq_seek *data = (struct vki_v4l2_hw_freq_seek *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_S_HW_FREQ_SEEK)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_S_DV_TIMINGS: {
+      struct vki_v4l2_dv_timings *data = (struct vki_v4l2_dv_timings *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_S_DV_TIMINGS).type", data->type);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_S_DV_TIMINGS).bt", data->bt);
+      break;
+   }
+   case VKI_V4L2_G_DV_TIMINGS: {
+      struct vki_v4l2_dv_timings *data = (struct vki_v4l2_dv_timings *)ARG3;
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_G_DV_TIMINGS)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_DQEVENT: {
+      struct vki_v4l2_event *data = (struct vki_v4l2_event *)ARG3;
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_DQEVENT)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_SUBSCRIBE_EVENT: {
+      struct vki_v4l2_event_subscription *data = (struct vki_v4l2_event_subscription *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_SUBSCRIBE_EVENT)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_UNSUBSCRIBE_EVENT: {
+      struct vki_v4l2_event_subscription *data = (struct vki_v4l2_event_subscription *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_UNSUBSCRIBE_EVENT)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_CREATE_BUFS: {
+      struct vki_v4l2_create_buffers *data = (struct vki_v4l2_create_buffers *)ARG3;
+      struct vki_v4l2_format *fmt = &data->format;
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_CREATE_BUFS).index", data->index);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_CREATE_BUFS).count", data->count);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_CREATE_BUFS).memory", data->memory);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_CREATE_BUFS).reserved", data->reserved);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_CREATE_BUFS).format.type", fmt->type);
+      switch (fmt->type) {
+      case VKI_V4L2_BUF_TYPE_VIDEO_CAPTURE:
+      case VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT:
+         PRE_FIELD_READ("ioctl(VKI_V4L2_CREATE_BUFS).format.pix", fmt->fmt.raw_data);
+         break;
+      case VKI_V4L2_BUF_TYPE_VBI_CAPTURE:
+      case VKI_V4L2_BUF_TYPE_VBI_OUTPUT:
+         PRE_FIELD_READ("ioctl(VKI_V4L2_CREATE_BUFS).format.vbi", fmt->fmt.vbi);
+         break;
+      case VKI_V4L2_BUF_TYPE_SLICED_VBI_CAPTURE:
+      case VKI_V4L2_BUF_TYPE_SLICED_VBI_OUTPUT:
+         PRE_FIELD_READ("ioctl(VKI_V4L2_CREATE_BUFS).format.sliced", fmt->fmt.sliced);
+         break;
+      case VKI_V4L2_BUF_TYPE_VIDEO_OVERLAY:
+      case VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT_OVERLAY:
+         PRE_FIELD_READ("ioctl(VKI_V4L2_CREATE_BUFS).format.win", fmt->fmt.win);
+         break;
+      case VKI_V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:
+      case VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE:
+         PRE_FIELD_READ("ioctl(VKI_V4L2_CREATE_BUFS).format.pix_mp", fmt->fmt.pix_mp);
+         break;
+      case VKI_V4L2_BUF_TYPE_SDR_CAPTURE:
+         PRE_FIELD_READ("ioctl(VKI_V4L2_CREATE_BUFS).format.sdr", fmt->fmt.sdr);
+         break;
+      }
+      break;
+   }
+   case VKI_V4L2_PREPARE_BUF: {
+      struct vki_v4l2_buffer *data = (struct vki_v4l2_buffer *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_PREPARE_BUF).index", data->index);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_PREPARE_BUF).type", data->type);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_PREPARE_BUF).memory", data->memory);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_PREPARE_BUF).reserved", data->reserved);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_PREPARE_BUF).reserved2", data->reserved2);
+      if (data->type == VKI_V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ||
+            data->type == VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
+         unsigned i;
+
+         PRE_FIELD_READ("ioctl(VKI_V4L2_PREPARE_BUF).length", data->length);
+         PRE_FIELD_READ("ioctl(VKI_V4L2_PREPARE_BUF).m.planes", data->m.planes);
+         for (i = 0; i < data->length; i++) {
+            PRE_FIELD_READ("ioctl(VKI_V4L2_PREPARE_BUF).m.planes[].reserved", data->m.planes[i].reserved);
+         }
+      }
+      break;
+   }
+   case VKI_V4L2_G_SELECTION: {
+      struct vki_v4l2_selection *data = (struct vki_v4l2_selection *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_G_SELECTION).type", data->type);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_G_SELECTION).target", data->target);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_G_SELECTION).flags", data->flags);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_G_SELECTION).reserved", data->reserved);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_G_SELECTION).r", data->r);
+      break;
+   }
+   case VKI_V4L2_S_SELECTION: {
+      struct vki_v4l2_selection *data = (struct vki_v4l2_selection *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_S_SELECTION)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_DECODER_CMD: {
+      struct vki_v4l2_decoder_cmd *data = (struct vki_v4l2_decoder_cmd *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_DECODER_CMD)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_TRY_DECODER_CMD: {
+      struct vki_v4l2_decoder_cmd *data = (struct vki_v4l2_decoder_cmd *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_TRY_DECODER_CMD)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_ENUM_DV_TIMINGS: {
+      struct vki_v4l2_enum_dv_timings *data = (struct vki_v4l2_enum_dv_timings *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_ENUM_DV_TIMINGS).index", data->index);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_ENUM_DV_TIMINGS).pad", data->pad);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_ENUM_DV_TIMINGS).reserved", data->reserved);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_ENUM_DV_TIMINGS).timings", data->timings);
+      break;
+   }
+   case VKI_V4L2_QUERY_DV_TIMINGS: {
+      struct vki_v4l2_dv_timings *data = (struct vki_v4l2_dv_timings *)ARG3;
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_QUERY_DV_TIMINGS)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_DV_TIMINGS_CAP: {
+      struct vki_v4l2_dv_timings_cap *data = (struct vki_v4l2_dv_timings_cap *)ARG3;
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_DV_TIMINGS_CAP)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_ENUM_FREQ_BANDS: {
+      struct vki_v4l2_frequency_band *data = (struct vki_v4l2_frequency_band *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_ENUM_FREQ_BANDS).tuner", data->tuner);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_ENUM_FREQ_BANDS).type", data->type);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_ENUM_FREQ_BANDS).index", data->index);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_ENUM_FREQ_BANDS).reserved", data->reserved);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_ENUM_FREQ_BANDS).capability", data->capability);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_ENUM_FREQ_BANDS).rangelow", data->rangelow);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_ENUM_FREQ_BANDS).rangehigh", data->rangehigh);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_ENUM_FREQ_BANDS).modulation", data->modulation);
+      break;
+   }
+   case VKI_V4L2_DBG_G_CHIP_INFO: {
+      struct vki_v4l2_dbg_chip_info *data = (struct vki_v4l2_dbg_chip_info *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_DBG_G_CHIP_INFO).match.type", data->match.type);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_DBG_G_CHIP_INFO).match.addr", data->match.addr);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_DBG_G_CHIP_INFO).name", data->name);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_DBG_G_CHIP_INFO).flags", data->flags);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_DBG_G_CHIP_INFO).reserved", data->reserved);
+      break;
+   }
+   case VKI_V4L2_QUERY_EXT_CTRL: {
+      struct vki_v4l2_query_ext_ctrl *data = (struct vki_v4l2_query_ext_ctrl *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_QUERY_EXT_CTRL).id", data->id);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_QUERY_EXT_CTRL).reserved", data->reserved);
+      PRE_MEM_WRITE("ioctl(VKI_V4L2_QUERY_EXT_CTRL)", (Addr)&data->type,
+            sizeof(*data) - sizeof(data->id) - sizeof(data->reserved));
+      break;
+   }
+   case VKI_V4L2_SUBDEV_G_FMT: {
+      struct vki_v4l2_subdev_format *data = (struct vki_v4l2_subdev_format *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_G_FMT).pad", data->pad);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_G_FMT).which", data->which);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_G_FMT).reserved", data->reserved);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_SUBDEV_G_FMT).format", data->format);
+      break;
+   }
+   case VKI_V4L2_SUBDEV_S_FMT: {
+      struct vki_v4l2_subdev_format *data = (struct vki_v4l2_subdev_format *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_SUBDEV_S_FMT)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_SUBDEV_G_FRAME_INTERVAL: {
+      struct vki_v4l2_subdev_frame_interval *data = (struct vki_v4l2_subdev_frame_interval *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_G_FRAME_SIZE).pad", data->pad);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_G_FRAME_SIZE).reserved", data->reserved);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_SUBDEV_G_FRAME_SIZE).interval", data->interval);
+      break;
+   }
+   case VKI_V4L2_SUBDEV_S_FRAME_INTERVAL: {
+      struct vki_v4l2_subdev_frame_interval *data = (struct vki_v4l2_subdev_frame_interval *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_SUBDEV_S_FRAME_INTERVAL)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_SUBDEV_ENUM_MBUS_CODE: {
+      struct vki_v4l2_subdev_mbus_code_enum *data = (struct vki_v4l2_subdev_mbus_code_enum *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_ENUM_MBUS_CODE).index", data->index);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_ENUM_MBUS_CODE).pad", data->pad);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_SUBDEV_ENUM_MBUS_CODE).code", data->code);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_ENUM_MBUS_CODE).which", data->which);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_ENUM_MBUS_CODE).reserved", data->reserved);
+      break;
+   }
+   case VKI_V4L2_SUBDEV_ENUM_FRAME_SIZE: {
+      struct vki_v4l2_subdev_frame_size_enum *data = (struct vki_v4l2_subdev_frame_size_enum *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_ENUM_FRAME_SIZE).index", data->index);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_ENUM_FRAME_SIZE).pad", data->pad);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_ENUM_FRAME_SIZE).code", data->code);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_ENUM_FRAME_SIZE).which", data->which);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_ENUM_FRAME_SIZE).reserved", data->reserved);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_SUBDEV_ENUM_FRAME_SIZE).min_width", data->min_width);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_SUBDEV_ENUM_FRAME_SIZE).min_height", data->min_height);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_SUBDEV_ENUM_FRAME_SIZE).max_width", data->max_width);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_SUBDEV_ENUM_FRAME_SIZE).max_height", data->max_height);
+      break;
+   }
+   case VKI_V4L2_SUBDEV_ENUM_FRAME_INTERVAL: {
+      struct vki_v4l2_subdev_frame_interval_enum *data = (struct vki_v4l2_subdev_frame_interval_enum *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_ENUM_FRAME_INTERVAL).index", data->index);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_ENUM_FRAME_INTERVAL).pad", data->pad);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_ENUM_FRAME_INTERVAL).code", data->code);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_ENUM_FRAME_INTERVAL).width", data->width);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_ENUM_FRAME_INTERVAL).height", data->height);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_ENUM_FRAME_INTERVAL).which", data->which);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_ENUM_FRAME_INTERVAL).reserved", data->reserved);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_SUBDEV_ENUM_FRAME_INTERVAL).interval", data->interval);
+      break;
+   }
+   case VKI_V4L2_SUBDEV_G_CROP: {
+      struct vki_v4l2_subdev_crop *data = (struct vki_v4l2_subdev_crop *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_G_CROP).pad", data->pad);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_G_CROP).which", data->which);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_G_CROP).reserved", data->reserved);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_SUBDEV_G_CROP).rect", data->rect);
+      break;
+   }
+   case VKI_V4L2_SUBDEV_S_CROP: {
+      struct vki_v4l2_subdev_crop *data = (struct vki_v4l2_subdev_crop *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_SUBDEV_S_CROP)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_SUBDEV_G_SELECTION: {
+      struct vki_v4l2_subdev_selection *data = (struct vki_v4l2_subdev_selection *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_G_SELECTION).pad", data->pad);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_G_SELECTION).which", data->which);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_G_SELECTION).target", data->target);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_G_SELECTION).flags", data->flags);
+      PRE_FIELD_READ("ioctl(VKI_V4L2_SUBDEV_G_SELECTION).reserved", data->reserved);
+      PRE_FIELD_WRITE("ioctl(VKI_V4L2_SUBDEV_G_SELECTION).r", data->r);
+      break;
+   }
+   case VKI_V4L2_SUBDEV_S_SELECTION: {
+      struct vki_v4l2_subdev_selection *data = (struct vki_v4l2_subdev_selection *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_V4L2_SUBDEV_S_SELECTION)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_MEDIA_IOC_DEVICE_INFO: {
+      struct vki_media_device_info *data = (struct vki_media_device_info *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_MEDIA_IOC_DEVICE_INFO).reserved", data->reserved);
+      PRE_MEM_WRITE("ioctl(VKI_MEDIA_IOC_DEVICE_INFO)",
+            (Addr)data, sizeof(*data) - sizeof(data->reserved));
+      break;
+   }
+   case VKI_MEDIA_IOC_ENUM_ENTITIES: {
+      struct vki_media_entity_desc *data = (struct vki_media_entity_desc *)ARG3;
+      PRE_FIELD_READ("ioctl(VKI_MEDIA_IOC_ENUM_ENTITIES).id", data->id);
+      PRE_MEM_WRITE("ioctl(VKI_MEDIA_IOC_ENUM_ENTITIES)",
+            (Addr)data->name, sizeof(*data) - sizeof(data->id));
+      break;
+   }
+   case VKI_MEDIA_IOC_ENUM_LINKS: {
+      struct vki_media_links_enum *data = (struct vki_media_links_enum *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_MEDIA_IOC_ENUM_LINKS)", (Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_MEDIA_IOC_SETUP_LINK: {
+      struct vki_media_link_desc *data = (struct vki_media_link_desc *)ARG3;
+      PRE_MEM_READ("ioctl(VKI_MEDIA_IOC_SETUP_LINK)", (Addr)data, sizeof(*data));
+      break;
+   }
 
    default:
       /* EVIOC* are variable length and return size written on success */
@@ -7014,101 +8338,112 @@ POST(sys_ioctl)
 {
    vg_assert(SUCCESS);
 
+   ARG2 = (UInt)ARG2;
+
    /* --- BEGIN special IOCTL handlers for specific Android hardware --- */
 
-#  if defined(VGPV_arm_linux_android) || defined(VGPV_x86_linux_android) \
-      || defined(VGPV_mips32_linux_android)
+   /* BEGIN undocumented ioctls for PowerVR SGX 540 (the GPU on Nexus S) */
+   if (KernelVariantiS(KernelVariant_android_gpu_sgx5xx,
+                       VG_(clo_kernel_variant))) {
 
-#  if defined(ANDROID_HARDWARE_nexus_s)
+      if (ARG2 >= 0xC01C6700 && ARG2 <= 0xC01C67FF && ARG3 >= 0x1000) {
+         /* What's going on here: there appear to be a bunch of ioctls
+            of the form 0xC01C67xx which are undocumented, and if
+            unhandled give rise to a vast number of false positives in
+            Memcheck.
 
-   /* BEGIN undocumented ioctls for the graphics hardware (??)
-      (libpvr) on Nexus S */
-   if (ARG2 >= 0xC01C6700 && ARG2 <= 0xC01C67FF && ARG3 >= 0x1000) {
-      /* What's going on here: there appear to be a bunch of ioctls of
-         the form 0xC01C67xx which are undocumented, and if unhandled
-         give rise to a vast number of false positives in Memcheck.
+            The "normal" interpretation of an ioctl of this form would
+            be that the 3rd arg is a pointer to an area of size 0x1C
+            (28 bytes) which is filled in by the kernel.  Hence you
+            might think that "POST_MEM_WRITE(ARG3, 28)" would fix it.
+            But it doesn't.
 
-         The "normal" intrepretation of an ioctl of this form would be
-         that the 3rd arg is a pointer to an area of size 0x1C (28
-         bytes) which is filled in by the kernel.  Hence you might
-         think that "POST_MEM_WRITE(ARG3, 28)" would fix it.  But it
-         doesn't.
+            It requires POST_MEM_WRITE(ARG3, 256) to silence them.
+            One interpretation of this is that ARG3 really does point
+            to a 28 byte struct, but inside that are pointers to other
+            areas also filled in by the kernel.  If these happen to be
+            allocated just back up the stack then the 256 byte paint
+            might cover them too, somewhat indiscriminately.
 
-         It requires POST_MEM_WRITE(ARG3, 256) to silence them.  One
-         interpretation of this is that ARG3 really does point to a 28
-         byte struct, but inside that are pointers to other areas also
-         filled in by the kernel.  If these happen to be allocated
-         just back up the stack then the 256 byte paint might cover
-         them too, somewhat indiscriminately.
+            By printing out ARG3 and also the 28 bytes that it points
+            at, it's possible to guess that the 7 word structure has
+            this form
 
-         By printing out ARG3 and also the 28 bytes that it points at,
-         it's possible to guess that the 7 word structure has this form
+              0            1    2    3        4    5        6           
+              ioctl-number 0x1C ptr1 ptr1size ptr2 ptr2size aBitMask
 
-           0            1    2    3        4    5        6           
-           ioctl-number 0x1C ptr1 ptr1size ptr2 ptr2size aBitMask
-
-         Unfortunately that doesn't seem to work for some reason, so
-         stay with the blunt-instrument approach for the time being.
-      */
-      if (1) {
-         /* blunt-instrument approach */
-         if (0) VG_(printf)("QQQQQQQQQQ c01c quick hack actioned"
-                            " (%08lx, %08lx)\n", ARG2, ARG3);
-         POST_MEM_WRITE(ARG3, 256);
-      } else {
-         /* be a bit more sophisticated */
-         if (0) VG_(printf)("QQQQQQQQQQ c01c quick hack actioned"
-                            " (%08lx, %08lx) (fancy)\n", ARG2, ARG3);
-         POST_MEM_WRITE(ARG3, 28);
-         UInt* word = (UInt*)ARG3;
-         if (word && word[2] && word[3] < 0x200/*stay sane*/)
-            POST_MEM_WRITE(word[2], word[3]); // "ptr1"
-         if (word && word[4] && word[5] < 0x200/*stay sane*/)
-            POST_MEM_WRITE(word[4], word[5]); // "ptr2"
-      }
-      if (0) {
-         Int i;
-         VG_(printf)("QQQQQQQQQQ ");
-         for (i = 0; i < (0x1C/4); i++) {
-            VG_(printf)("%08x ", ((UInt*)(ARG3))[i]);
+            Unfortunately that doesn't seem to work for some reason,
+            so stay with the blunt-instrument approach for the time
+            being.
+         */
+         if (1) {
+            /* blunt-instrument approach */
+            POST_MEM_WRITE(ARG3, 256);
+         } else {
+            /* be a bit more sophisticated */
+            POST_MEM_WRITE(ARG3, 28);
+            UInt* word = (UInt*)ARG3;
+            if (word && word[2] && word[3] < 0x200/*stay sane*/)
+               POST_MEM_WRITE(word[2], word[3]); // "ptr1"
+            if (word && word[4] && word[5] < 0x200/*stay sane*/)
+               POST_MEM_WRITE(word[4], word[5]); // "ptr2"
          }
-         VG_(printf)("\n");
+         goto post_sys_ioctl__out;
       }
-      return;
    }
-   /* END Nexus S specific ioctls */
+   /* END undocumented ioctls for PowerVR SGX 540 (the GPU on Nexus S) */
 
-
-#  elif defined(ANDROID_HARDWARE_generic) || defined(ANDROID_HARDWARE_emulator)
-
-   /* BEGIN generic/emulator specific ioctls */
-   /* currently none are known */
-   /* END generic/emulator specific ioctls */
-
-
-#  else /* no ANDROID_HARDWARE_anything defined */
-
-#   warning ""
-#   warning "You need to define one the CPP symbols ANDROID_HARDWARE_blah"
-#   warning "at configure time, to tell Valgrind what hardware you are"
-#   warning "building for.  Currently known values are"
-#   warning ""
-#   warning "   ANDROID_HARDWARE_nexus_s       Samsung Nexus S"
-#   warning "   ANDROID_HARDWARE_generic       Generic device (eg, Pandaboard)"
-#   warning "   ANDROID_HARDWARE_emulator      x86 or arm emulator"
-#   warning ""
-#   warning "Make sure you exactly follow the steps in README.android."
-#   warning ""
-#   error "No CPP symbol ANDROID_HARDWARE_blah defined.  Giving up."
-
-#  endif /* cases for ANDROID_HARDWARE_blah */
-
-#  endif /* defined(VGPV_*_linux_android) */
+   /* BEGIN undocumented ioctls for Qualcomm Adreno 3xx */
+   if (KernelVariantiS(KernelVariant_android_gpu_adreno3xx,
+                       VG_(clo_kernel_variant))) {
+     if (ARG2 == 0xC00C0902) {
+         POST_MEM_WRITE(ARG3, 24); // 16 is not enough
+         goto post_sys_ioctl__out;
+     }
+   }
+   /* END undocumented ioctls for Qualcomm Adreno 3xx */
 
    /* --- END special IOCTL handlers for specific Android hardware --- */
 
    /* --- normal handling --- */
    switch (ARG2 /* request */) {
+
+   /* The Linux kernel "ion" memory allocator, used on Android.  Note:
+      this is pretty poor given that there's no pre-handling to check
+      that writable areas are addressable. */
+   case VKI_ION_IOC_ALLOC: {
+      struct vki_ion_allocation_data* data
+         = (struct vki_ion_allocation_data*)ARG3;
+      POST_FIELD_WRITE(data->handle);
+      break;
+   }
+   case VKI_ION_IOC_MAP: {
+      struct vki_ion_fd_data* data = (struct vki_ion_fd_data*)ARG3;
+      POST_FIELD_WRITE(data->fd);
+      break;
+   }
+   case VKI_ION_IOC_FREE: // is this necessary?
+      POST_MEM_WRITE(ARG3, sizeof(struct vki_ion_handle_data));
+      break;
+   case VKI_ION_IOC_SHARE:
+      break;
+   case VKI_ION_IOC_IMPORT: {
+      struct vki_ion_fd_data* data = (struct vki_ion_fd_data*)ARG3;
+      POST_FIELD_WRITE(data->handle);
+      break;
+   }
+   case VKI_ION_IOC_SYNC:
+      break;
+   case VKI_ION_IOC_CUSTOM: // is this necessary?
+      POST_MEM_WRITE(ARG3, sizeof(struct vki_ion_custom_data));
+      break;
+
+   case VKI_SYNC_IOC_MERGE: {
+      struct vki_sync_merge_data* data = (struct vki_sync_merge_data*)ARG3;
+      POST_FIELD_WRITE(data->fence);
+      break;
+   }
+
    case VKI_TCSETS:
    case VKI_TCSETSW:
    case VKI_TCSETSF:
@@ -7128,6 +8463,7 @@ POST(sys_ioctl)
    case VKI_TCXONC:
    case VKI_TCSBRKP:
    case VKI_TCFLSH:
+   case VKI_TIOCSIG:
       break;
    case VKI_TIOCGWINSZ:
       POST_MEM_WRITE( ARG3, sizeof(struct vki_winsize) );
@@ -7164,6 +8500,8 @@ POST(sys_ioctl)
       break;
    case VKI_FIOCLEX:
       break;
+   case VKI_TIOCNOTTY:
+      break;
    case VKI_FIOASYNC:
       break;
    case VKI_FIONREAD:                /* identical to SIOCINQ */
@@ -7183,7 +8521,17 @@ POST(sys_ioctl)
    case VKI_SG_SET_COMMAND_Q:
       break;
    case VKI_SG_IO:
-      POST_MEM_WRITE(ARG3, sizeof(vki_sg_io_hdr_t));
+      {
+         vki_sg_io_hdr_t *sgio = (vki_sg_io_hdr_t*)ARG3;
+         if ( sgio->sbp ) {
+            POST_MEM_WRITE( (Addr)sgio->sbp, sgio->sb_len_wr );
+         }
+         if ( sgio->dxfer_direction == VKI_SG_DXFER_FROM_DEV ||
+              sgio->dxfer_direction == VKI_SG_DXFER_TO_FROM_DEV ) {
+            int transferred = sgio->dxfer_len - sgio->resid;
+            POST_MEM_WRITE( (Addr)sgio->dxferp, transferred );
+         }
+      }
       break;
    case VKI_SG_GET_SCSI_ID:
       POST_MEM_WRITE(ARG3, sizeof(vki_sg_scsi_id_t));
@@ -7260,6 +8608,86 @@ POST(sys_ioctl)
                 (Addr)&((struct vki_ifreq *)ARG3)->vki_ifr_name,
                 sizeof(((struct vki_ifreq *)ARG3)->vki_ifr_name) );
       break;
+   case VKI_SIOCETHTOOL: {       /* ethtool(8) interface         */
+      struct vki_ifreq *ir = (struct vki_ifreq *)ARG3;
+      switch ( *(vki_u32 *)ir->vki_ifr_data ) {
+      case VKI_ETHTOOL_GSET:
+         POST_MEM_WRITE( (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_cmd));
+         break;
+      case VKI_ETHTOOL_SSET:
+         break;
+      case VKI_ETHTOOL_GDRVINFO:
+         POST_MEM_WRITE( (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_drvinfo) );
+         break;
+      case VKI_ETHTOOL_GREGS:
+         POST_MEM_WRITE( (Addr)((struct vki_ethtool_regs *)ir->vki_ifr_data)->data,
+                         ((struct vki_ethtool_regs *)ir->vki_ifr_data)->len );
+         break;
+      case VKI_ETHTOOL_GWOL:
+         POST_MEM_WRITE( (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_wolinfo) );
+         break;
+      case VKI_ETHTOOL_SWOL:
+         break;
+      case VKI_ETHTOOL_GMSGLVL:
+      case VKI_ETHTOOL_GLINK:
+      case VKI_ETHTOOL_GRXCSUM:
+      case VKI_ETHTOOL_GSG:
+      case VKI_ETHTOOL_GTSO:
+      case VKI_ETHTOOL_GUFO:
+      case VKI_ETHTOOL_GGSO:
+      case VKI_ETHTOOL_GFLAGS:
+      case VKI_ETHTOOL_GGRO:
+         POST_MEM_WRITE( (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_value));
+         break;
+      case VKI_ETHTOOL_SMSGLVL:
+      case VKI_ETHTOOL_SRXCSUM:
+      case VKI_ETHTOOL_SSG:
+      case VKI_ETHTOOL_STSO:
+      case VKI_ETHTOOL_SUFO:
+      case VKI_ETHTOOL_SGSO:
+      case VKI_ETHTOOL_SFLAGS:
+      case VKI_ETHTOOL_SGRO:
+         break;
+      case VKI_ETHTOOL_NWAY_RST:
+         break;
+      case VKI_ETHTOOL_GRINGPARAM:
+         POST_MEM_WRITE( (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_ringparam));
+         break;
+      case VKI_ETHTOOL_SRINGPARAM:
+         break;
+      case VKI_ETHTOOL_TEST:
+         POST_MEM_WRITE( (Addr)((struct vki_ethtool_test *)ir->vki_ifr_data)->data,
+                         ((struct vki_ethtool_test *)ir->vki_ifr_data)->len * sizeof(__vki_u64) );
+         break;
+      case VKI_ETHTOOL_PHYS_ID:
+         break;
+      case VKI_ETHTOOL_GPERMADDR:
+         POST_MEM_WRITE( (Addr)((struct vki_ethtool_perm_addr *)ir->vki_ifr_data)->data,
+                         ((struct vki_ethtool_perm_addr *)ir->vki_ifr_data)->size );
+         break;
+      case VKI_ETHTOOL_RESET:
+         break;
+      case VKI_ETHTOOL_GSSET_INFO:
+         POST_MEM_WRITE( (Addr)((struct vki_ethtool_sset_info *)ir->vki_ifr_data)->data,
+                        __builtin_popcountll(((struct vki_ethtool_sset_info *)ir->vki_ifr_data)->sset_mask) * sizeof(__vki_u32) );
+         break;
+      case VKI_ETHTOOL_GFEATURES:
+         POST_MEM_WRITE( (Addr)((struct vki_ethtool_gfeatures *)ir->vki_ifr_data)->features,
+                         ((struct vki_ethtool_gfeatures *)ir->vki_ifr_data)->size * sizeof(struct vki_ethtool_get_features_block) );
+         break;
+      case VKI_ETHTOOL_SFEATURES:
+         break;
+      case VKI_ETHTOOL_GCHANNELS:
+         POST_MEM_WRITE( (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_channels) );
+         break;
+      case VKI_ETHTOOL_SCHANNELS:
+         break;
+      case VKI_ETHTOOL_GET_TS_INFO:
+         POST_MEM_WRITE( (Addr)ir->vki_ifr_data, sizeof(struct vki_ethtool_ts_info) );
+         break;
+      }
+      break;
+   }
    case VKI_SIOCGMIIPHY:         /* get hardware entry           */
       POST_MEM_WRITE(
                 (Addr)&((struct vki_mii_ioctl_data *)&((struct vki_ifreq *)ARG3)->vki_ifr_data)->phy_id,
@@ -7276,11 +8704,20 @@ POST(sys_ioctl)
       POST_MEM_WRITE( (Addr)&((struct vki_ifreq *)ARG3)->vki_ifr_name,
                       sizeof(((struct vki_ifreq *)ARG3)->vki_ifr_name) );
       break;
+   case VKI_TUNGETFEATURES:
+      POST_MEM_WRITE( ARG3, sizeof(unsigned int) );
+      break;
    case VKI_TUNGETIFF:
       POST_MEM_WRITE( (Addr)&((struct vki_ifreq *)ARG3)->vki_ifr_name,
                       sizeof(((struct vki_ifreq *)ARG3)->vki_ifr_name) );
       POST_MEM_WRITE( (Addr)&((struct vki_ifreq *)ARG3)->vki_ifr_flags,
                       sizeof(((struct vki_ifreq *)ARG3)->vki_ifr_flags) );
+      break;
+   case VKI_TUNGETSNDBUF:
+      POST_MEM_WRITE( ARG3, sizeof(int) );
+      break;
+   case VKI_TUNGETVNETHDRSZ:
+      POST_MEM_WRITE( ARG3, sizeof(int) );
       break;
 
    case VKI_SIOCGIFCONF:         /* get iface list               */
@@ -7344,6 +8781,10 @@ POST(sys_ioctl)
       POST_MEM_WRITE(ARG3, sizeof(int));
       break;
    case VKI_SIOCSPGRP:
+      break;
+
+   case VKI_SIOCATMARK:
+      POST_MEM_WRITE(ARG3, sizeof(int));
       break;
 
       /* linux/soundcard interface (OSS) */
@@ -7414,6 +8855,30 @@ POST(sys_ioctl)
    case VKI_SNDRV_TIMER_IOCTL_STOP:
    case VKI_SNDRV_TIMER_IOCTL_CONTINUE:
    case VKI_SNDRV_TIMER_IOCTL_PAUSE:
+   case VKI_SNDRV_CTL_IOCTL_PVERSION: {
+      POST_MEM_WRITE( (Addr)ARG3, sizeof(int) );
+      break;
+   }
+   case VKI_SNDRV_CTL_IOCTL_CARD_INFO:
+      POST_MEM_WRITE( (Addr)ARG3, sizeof(struct vki_snd_ctl_card_info) );
+      break;
+   case VKI_SNDRV_CTL_IOCTL_ELEM_LIST: {
+      struct vki_snd_ctl_elem_list *data = (struct vki_snd_ctl_elem_list *)ARG3;
+      POST_MEM_WRITE( (Addr)&data->used, sizeof(data->used) );
+      POST_MEM_WRITE( (Addr)&data->count, sizeof(data->count) );
+      if (data->pids) {
+         POST_MEM_WRITE( (Addr)data->pids, sizeof(struct vki_snd_ctl_elem_id) * data->used );
+      }
+      break;
+   }
+   case VKI_SNDRV_CTL_IOCTL_TLV_READ: {
+      struct vki_snd_ctl_tlv *data = (struct vki_snd_ctl_tlv *)ARG3;
+      POST_MEM_WRITE( (Addr)data->tlv, data->length );
+      break;
+   }
+   case VKI_SNDRV_CTL_IOCTL_TLV_WRITE:
+   case VKI_SNDRV_CTL_IOCTL_TLV_COMMAND:
+      break;
 
       /* SCSI no operand */
    case VKI_SCSI_IOCTL_DOORLOCK:
@@ -7475,6 +8940,9 @@ POST(sys_ioctl)
    case VKI_BLKPBSZGET:
       POST_MEM_WRITE(ARG3, sizeof(int));
       break;
+   case VKI_BLKDISCARDZEROES:
+      POST_MEM_WRITE(ARG3, sizeof(vki_uint));
+      break;
 
       /* Hard disks */
    case VKI_HDIO_GETGEO: /* 0x0301 */
@@ -7496,6 +8964,8 @@ POST(sys_ioctl)
       break;
 
       /* CD ROM stuff (??)  */
+   case VKI_CDROM_DISC_STATUS:
+      break;
    case VKI_CDROMSUBCHNL:
       POST_MEM_WRITE(ARG3, sizeof(struct vki_cdrom_subchnl));
       break;
@@ -7849,6 +9319,43 @@ POST(sys_ioctl)
           }
       }
       break;
+   case VKI_I2C_SMBUS:
+       if ( ARG3 ) {
+            struct vki_i2c_smbus_ioctl_data *vkis
+               = (struct vki_i2c_smbus_ioctl_data *) ARG3;
+            /* i2c_smbus_write_quick hides its value in read_write, so
+               this variable can hava a different meaning */
+            /* to make matters worse i2c_smbus_write_byte stores its
+               value in command */
+            if ((vkis->read_write == VKI_I2C_SMBUS_READ)
+                || (vkis->size == VKI_I2C_SMBUS_PROC_CALL)
+                || (vkis->size == VKI_I2C_SMBUS_BLOCK_PROC_CALL)) {
+                if ( ! ((vkis->size == VKI_I2C_SMBUS_QUICK) 
+                        && (vkis->command == VKI_I2C_SMBUS_QUICK))) {
+                    UInt size;
+                    switch(vkis->size) {
+                        case VKI_I2C_SMBUS_BYTE:
+                        case VKI_I2C_SMBUS_BYTE_DATA:
+                            size = 1;
+                            break;
+                        case VKI_I2C_SMBUS_WORD_DATA:
+                        case VKI_I2C_SMBUS_PROC_CALL:
+                            size = 2;
+                            break;
+                        case VKI_I2C_SMBUS_BLOCK_DATA:
+                        case VKI_I2C_SMBUS_I2C_BLOCK_BROKEN:
+                        case VKI_I2C_SMBUS_BLOCK_PROC_CALL:
+                        case VKI_I2C_SMBUS_I2C_BLOCK_DATA:
+                            size = vkis->data->block[0];
+                            break;
+                        default:
+                            size = 0;
+                    }
+                    POST_MEM_WRITE((Addr)&vkis->data->block[0], size);
+                }
+            }
+       }
+       break;
 
       /* Wireless extensions ioctls */
    case VKI_SIOCSIWCOMMIT:
@@ -7979,11 +9486,117 @@ POST(sys_ioctl)
        break;
 #  endif /* defined(VGPV_*_linux_android) */
 
+   case VKI_HCIGETDEVLIST:
+      if (ARG3) {
+        struct vki_hci_dev_list_req* dlr = (struct vki_hci_dev_list_req*)ARG3;
+        POST_MEM_WRITE((Addr)ARG3 + sizeof(struct vki_hci_dev_list_req),
+                       dlr->dev_num * sizeof(struct vki_hci_dev_req));
+      }
+      break;
+
    case VKI_HCIINQUIRY:
       if (ARG3) {
         struct vki_hci_inquiry_req* ir = (struct vki_hci_inquiry_req*)ARG3;
         POST_MEM_WRITE((Addr)ARG3 + sizeof(struct vki_hci_inquiry_req),
                        ir->num_rsp * sizeof(struct vki_inquiry_info));
+      }
+      break;
+
+   case VKI_DRM_IOCTL_VERSION:
+      if (ARG3) {
+         struct vki_drm_version *data = (struct vki_drm_version *)ARG3;
+	 POST_MEM_WRITE((Addr)&data->version_major, sizeof(data->version_major));
+         POST_MEM_WRITE((Addr)&data->version_minor, sizeof(data->version_minor));
+         POST_MEM_WRITE((Addr)&data->version_patchlevel, sizeof(data->version_patchlevel));
+         POST_MEM_WRITE((Addr)&data->name_len, sizeof(data->name_len));
+         POST_MEM_WRITE((Addr)data->name, data->name_len);
+         POST_MEM_WRITE((Addr)&data->date_len, sizeof(data->date_len));
+         POST_MEM_WRITE((Addr)data->date, data->date_len);
+         POST_MEM_WRITE((Addr)&data->desc_len, sizeof(data->desc_len));
+         POST_MEM_WRITE((Addr)data->desc, data->desc_len);
+      }
+      break;
+   case VKI_DRM_IOCTL_GET_UNIQUE:
+      if (ARG3) {
+         struct vki_drm_unique *data = (struct vki_drm_unique *)ARG3;
+	 POST_MEM_WRITE((Addr)data->unique, sizeof(data->unique_len));
+      }
+      break;
+   case VKI_DRM_IOCTL_GET_MAGIC:
+      if (ARG3) {
+         struct vki_drm_auth *data = (struct vki_drm_auth *)ARG3;
+         POST_MEM_WRITE((Addr)&data->magic, sizeof(data->magic));
+      }
+      break;
+   case VKI_DRM_IOCTL_WAIT_VBLANK:
+      if (ARG3) {
+         union vki_drm_wait_vblank *data = (union vki_drm_wait_vblank *)ARG3;
+         POST_MEM_WRITE((Addr)&data->reply, sizeof(data->reply));
+      }
+      break;
+   case VKI_DRM_IOCTL_GEM_FLINK:
+      if (ARG3) {
+         struct vki_drm_gem_flink *data = (struct vki_drm_gem_flink *)ARG3;
+         POST_MEM_WRITE((Addr)&data->name, sizeof(data->name));
+      }
+      break;
+   case VKI_DRM_IOCTL_GEM_OPEN:
+      if (ARG3) {
+         struct vki_drm_gem_open *data = (struct vki_drm_gem_open *)ARG3;
+	 POST_MEM_WRITE((Addr)&data->handle, sizeof(data->handle));
+	 POST_MEM_WRITE((Addr)&data->size, sizeof(data->size));
+      }
+      break;
+   case VKI_DRM_IOCTL_I915_GETPARAM:
+      if (ARG3) {
+         vki_drm_i915_getparam_t *data = (vki_drm_i915_getparam_t *)ARG3;
+	 POST_MEM_WRITE((Addr)data->value, sizeof(int));
+      }
+      break;
+   case VKI_DRM_IOCTL_I915_GEM_BUSY:
+      if (ARG3) {
+         struct vki_drm_i915_gem_busy *data = (struct vki_drm_i915_gem_busy *)ARG3;
+         POST_MEM_WRITE((Addr)&data->busy, sizeof(data->busy));
+      }
+      break;
+   case VKI_DRM_IOCTL_I915_GEM_CREATE:
+      if (ARG3) {
+         struct vki_drm_i915_gem_create *data = (struct vki_drm_i915_gem_create *)ARG3;
+	 POST_MEM_WRITE((Addr)&data->handle, sizeof(data->handle));
+      }
+      break;
+   case VKI_DRM_IOCTL_I915_GEM_PREAD:
+      if (ARG3) {
+         struct vki_drm_i915_gem_pread *data = (struct vki_drm_i915_gem_pread *)ARG3;
+	 POST_MEM_WRITE((Addr)data->data_ptr, data->size);
+      }
+      break;
+   case VKI_DRM_IOCTL_I915_GEM_MMAP_GTT:
+      if (ARG3) {
+         struct vki_drm_i915_gem_mmap_gtt *data = (struct vki_drm_i915_gem_mmap_gtt *)ARG3;
+         POST_MEM_WRITE((Addr)&data->offset, sizeof(data->offset));
+      }
+      break;
+   case VKI_DRM_IOCTL_I915_GEM_SET_TILING:
+      if (ARG3) {
+         struct vki_drm_i915_gem_set_tiling *data = (struct vki_drm_i915_gem_set_tiling *)ARG3;
+         POST_MEM_WRITE((Addr)&data->tiling_mode, sizeof(data->tiling_mode));
+         POST_MEM_WRITE((Addr)&data->stride, sizeof(data->stride));
+         POST_MEM_WRITE((Addr)&data->swizzle_mode, sizeof(data->swizzle_mode));
+      }
+      break;
+   case VKI_DRM_IOCTL_I915_GEM_GET_TILING:
+      if (ARG3) {
+         struct vki_drm_i915_gem_get_tiling *data = (struct vki_drm_i915_gem_get_tiling *)ARG3;
+	 POST_MEM_WRITE((Addr)&data->tiling_mode, sizeof(data->tiling_mode));
+         POST_MEM_WRITE((Addr)&data->swizzle_mode, sizeof(data->swizzle_mode));
+      }
+      break;
+   case VKI_DRM_IOCTL_I915_GEM_GET_APERTURE:
+      if (ARG3) {
+         struct vki_drm_i915_gem_get_aperture *data = (struct vki_drm_i915_gem_get_aperture *)ARG3;
+         POST_MEM_WRITE((Addr)&data->aper_size, sizeof(data->aper_size));
+         POST_MEM_WRITE((Addr)&data->aper_available_size, sizeof(data->aper_available_size));
       }
       break;
 
@@ -7994,32 +9607,34 @@ POST(sys_ioctl)
    case VKI_KVM_GET_VCPU_MMAP_SIZE:
    case VKI_KVM_S390_ENABLE_SIE:
    case VKI_KVM_CREATE_VCPU:
+   case VKI_KVM_SET_TSS_ADDR:
    case VKI_KVM_CREATE_IRQCHIP:
    case VKI_KVM_RUN:
    case VKI_KVM_S390_INITIAL_RESET:
+   case VKI_KVM_KVMCLOCK_CTRL:
       break;
 
 #ifdef ENABLE_XEN
    case VKI_XEN_IOCTL_PRIVCMD_HYPERCALL: {
-      SyscallArgs harrghs;
-      struct vki_xen_privcmd_hypercall *args =
-         (struct vki_xen_privcmd_hypercall *)(ARG3);
+       SyscallArgs harrghs;
+       struct vki_xen_privcmd_hypercall *args =
+          (struct vki_xen_privcmd_hypercall *)(ARG3);
 
-      if (!args)
-         break;
+       if (!args)
+          break;
 
-      VG_(memset)(&harrghs, 0, sizeof(harrghs));
-      harrghs.sysno = args->op;
-      harrghs.arg1 = args->arg[0];
-      harrghs.arg2 = args->arg[1];
-      harrghs.arg3 = args->arg[2];
-      harrghs.arg4 = args->arg[3];
-      harrghs.arg5 = args->arg[4];
-      harrghs.arg6 = harrghs.arg7 = harrghs.arg8 = 0;
+       VG_(memset)(&harrghs, 0, sizeof(harrghs));
+       harrghs.sysno = args->op;
+       harrghs.arg1 = args->arg[0];
+       harrghs.arg2 = args->arg[1];
+       harrghs.arg3 = args->arg[2];
+       harrghs.arg4 = args->arg[3];
+       harrghs.arg5 = args->arg[4];
+       harrghs.arg6 = harrghs.arg7 = harrghs.arg8 = 0;
 
-      WRAPPER_POST_NAME(xen, hypercall) (tid, &harrghs, status);
+       WRAPPER_POST_NAME(xen, hypercall) (tid, &harrghs, status);
+      }
       break;
-   };
 
    case VKI_XEN_IOCTL_PRIVCMD_MMAP:
       break;
@@ -8035,7 +9650,532 @@ POST(sys_ioctl)
        POST_MEM_WRITE((Addr)args->err, sizeof(*(args->err)) * args->num);
       }
       break;
+
+   case VKI_XEN_IOCTL_EVTCHN_BIND_VIRQ:
+   case VKI_XEN_IOCTL_EVTCHN_BIND_INTERDOMAIN:
+   case VKI_XEN_IOCTL_EVTCHN_BIND_UNBOUND_PORT:
+   case VKI_XEN_IOCTL_EVTCHN_UNBIND:
+   case VKI_XEN_IOCTL_EVTCHN_NOTIFY:
+   case VKI_XEN_IOCTL_EVTCHN_RESET:
+      /* No output */
+      break;
 #endif
+
+   /* Lustre */
+   case VKI_OBD_IOC_FID2PATH: {
+       struct vki_getinfo_fid2path *args = (void *)(ARG3);
+       POST_FIELD_WRITE(args->gf_recno);
+       POST_FIELD_WRITE(args->gf_linkno);
+       POST_MEM_WRITE((Addr)args->gf_path, VG_(strlen)(args->gf_path)+1);
+       break;
+      }
+
+   case VKI_LL_IOC_PATH2FID:
+       POST_MEM_WRITE(ARG3, sizeof(struct vki_lu_fid));
+      break;
+
+   case VKI_LL_IOC_GETPARENT: {
+       struct vki_getparent *gp = (struct vki_getparent *)ARG3;
+       POST_FIELD_WRITE(gp->gp_fid);
+       POST_MEM_WRITE((Addr)gp->gp_name, VG_(strlen)(gp->gp_name)+1);
+       break;
+   }
+
+   /* V4L2 */
+   case VKI_V4L2_S_FMT:
+   case VKI_V4L2_TRY_FMT:
+   case VKI_V4L2_REQBUFS:
+   case VKI_V4L2_OVERLAY:
+   case VKI_V4L2_STREAMON:
+   case VKI_V4L2_STREAMOFF:
+   case VKI_V4L2_S_PARM:
+   case VKI_V4L2_S_STD:
+   case VKI_V4L2_S_FREQUENCY:
+   case VKI_V4L2_S_CTRL:
+   case VKI_V4L2_S_TUNER:
+   case VKI_V4L2_S_AUDIO:
+   case VKI_V4L2_S_INPUT:
+   case VKI_V4L2_S_EDID:
+   case VKI_V4L2_S_OUTPUT:
+   case VKI_V4L2_S_AUDOUT:
+   case VKI_V4L2_S_MODULATOR:
+   case VKI_V4L2_S_JPEGCOMP:
+   case VKI_V4L2_S_CROP:
+   case VKI_V4L2_S_PRIORITY:
+   case VKI_V4L2_S_HW_FREQ_SEEK:
+   case VKI_V4L2_S_DV_TIMINGS:
+   case VKI_V4L2_SUBSCRIBE_EVENT:
+   case VKI_V4L2_UNSUBSCRIBE_EVENT:
+   case VKI_V4L2_PREPARE_BUF:
+      break;
+   case VKI_V4L2_QUERYCAP: {
+      struct vki_v4l2_capability *data = (struct vki_v4l2_capability *)ARG3;
+      POST_MEM_WRITE((Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_ENUM_FMT: {
+      struct vki_v4l2_fmtdesc *data = (struct vki_v4l2_fmtdesc *)ARG3;
+      POST_FIELD_WRITE(data->flags);
+      POST_FIELD_WRITE(data->description);
+      POST_FIELD_WRITE(data->pixelformat);
+      POST_FIELD_WRITE(data->reserved);
+      break;
+   }
+   case VKI_V4L2_G_FMT: {
+      struct vki_v4l2_format *data = (struct vki_v4l2_format *)ARG3;
+      switch (data->type) {
+      case VKI_V4L2_BUF_TYPE_VIDEO_CAPTURE:
+      case VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT:
+         POST_FIELD_WRITE(data->fmt.pix);
+         break;
+      case VKI_V4L2_BUF_TYPE_VBI_CAPTURE:
+      case VKI_V4L2_BUF_TYPE_VBI_OUTPUT:
+         POST_FIELD_WRITE(data->fmt.vbi);
+         break;
+      case VKI_V4L2_BUF_TYPE_SLICED_VBI_CAPTURE:
+      case VKI_V4L2_BUF_TYPE_SLICED_VBI_OUTPUT:
+         POST_FIELD_WRITE(data->fmt.sliced);
+         break;
+      case VKI_V4L2_BUF_TYPE_VIDEO_OVERLAY:
+      case VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT_OVERLAY:
+         POST_FIELD_WRITE(data->fmt.win);
+         break;
+      case VKI_V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:
+      case VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE:
+         POST_FIELD_WRITE(data->fmt.pix_mp);
+         break;
+      case VKI_V4L2_BUF_TYPE_SDR_CAPTURE:
+         POST_FIELD_WRITE(data->fmt.sdr);
+         break;
+      }
+      break;
+   }
+   case VKI_V4L2_QUERYBUF: {
+      struct vki_v4l2_buffer *data = (struct vki_v4l2_buffer *)ARG3;
+      if (data->type == VKI_V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ||
+            data->type == VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
+         unsigned i;
+
+         for (i = 0; i < data->length; i++) {
+            POST_FIELD_WRITE(data->m.planes[i].bytesused);
+            POST_FIELD_WRITE(data->m.planes[i].length);
+            POST_FIELD_WRITE(data->m.planes[i].m);
+            POST_FIELD_WRITE(data->m.planes[i].data_offset);
+            POST_FIELD_WRITE(data->m.planes[i].reserved);
+         }
+      } else {
+         POST_FIELD_WRITE(data->m);
+         POST_FIELD_WRITE(data->length);
+      }
+      POST_FIELD_WRITE(data->bytesused);
+      POST_FIELD_WRITE(data->flags);
+      POST_FIELD_WRITE(data->field);
+      POST_FIELD_WRITE(data->timestamp);
+      POST_FIELD_WRITE(data->timecode);
+      POST_FIELD_WRITE(data->sequence);
+      POST_FIELD_WRITE(data->memory);
+      POST_FIELD_WRITE(data->sequence);
+      break;
+   }
+   case VKI_V4L2_G_FBUF: {
+      struct vki_v4l2_framebuffer *data = (struct vki_v4l2_framebuffer *)ARG3;
+      POST_MEM_WRITE((Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_S_FBUF: {
+      struct vki_v4l2_framebuffer *data = (struct vki_v4l2_framebuffer *)ARG3;
+      POST_FIELD_WRITE(data->capability);
+      POST_FIELD_WRITE(data->flags);
+      POST_FIELD_WRITE(data->fmt);
+      break;
+   }
+   case VKI_V4L2_QBUF: {
+      struct vki_v4l2_buffer *data = (struct vki_v4l2_buffer *)ARG3;
+
+      if (data->type == VKI_V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ||
+            data->type == VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
+         unsigned i;
+
+         for (i = 0; i < data->length; i++) {
+            POST_FIELD_WRITE(data->m.planes[i].length);
+            if (data->memory == VKI_V4L2_MEMORY_MMAP)
+               POST_FIELD_WRITE(data->m.planes[i].m);
+         }
+      } else {
+         if (data->memory == VKI_V4L2_MEMORY_MMAP)
+            POST_FIELD_WRITE(data->m);
+         POST_FIELD_WRITE(data->length);
+      }
+      break;
+   }
+   case VKI_V4L2_EXPBUF: {
+      struct vki_v4l2_exportbuffer *data = (struct vki_v4l2_exportbuffer *)ARG3;
+      POST_FIELD_WRITE(data->fd);
+      break;
+   }
+   case VKI_V4L2_DQBUF: {
+      struct vki_v4l2_buffer *data = (struct vki_v4l2_buffer *)ARG3;
+      POST_FIELD_WRITE(data->index);
+      POST_FIELD_WRITE(data->bytesused);
+      POST_FIELD_WRITE(data->field);
+      if (data->type == VKI_V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ||
+            data->type == VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
+         unsigned i;
+
+         for (i = 0; i < data->length; i++) {
+            POST_FIELD_WRITE(data->m.planes[i].bytesused);
+            POST_FIELD_WRITE(data->m.planes[i].data_offset);
+            POST_FIELD_WRITE(data->m.planes[i].length);
+            POST_FIELD_WRITE(data->m.planes[i].m);
+         }
+      } else {
+         POST_FIELD_WRITE(data->m);
+         POST_FIELD_WRITE(data->length);
+         POST_FIELD_WRITE(data->bytesused);
+         POST_FIELD_WRITE(data->field);
+      }
+      POST_FIELD_WRITE(data->timestamp);
+      POST_FIELD_WRITE(data->timecode);
+      POST_FIELD_WRITE(data->sequence);
+      break;
+   }
+   case VKI_V4L2_G_PARM: {
+      struct vki_v4l2_streamparm *data = (struct vki_v4l2_streamparm *)ARG3;
+      int is_output = data->type == VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT ||
+         data->type == VKI_V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ||
+         data->type == VKI_V4L2_BUF_TYPE_VBI_OUTPUT ||
+         data->type == VKI_V4L2_BUF_TYPE_SLICED_VBI_OUTPUT;
+
+      if (is_output)
+        POST_MEM_WRITE((Addr)&data->parm.output,
+            sizeof(data->parm.output) - sizeof(data->parm.output.reserved));
+      else
+        POST_MEM_WRITE((Addr)&data->parm.capture,
+            sizeof(data->parm.capture) - sizeof(data->parm.capture.reserved));
+      break;
+   }
+   case VKI_V4L2_G_STD: {
+      vki_v4l2_std_id *data = (vki_v4l2_std_id *)ARG3;
+      POST_MEM_WRITE((Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_ENUMSTD: {
+      struct vki_v4l2_standard *data = (struct vki_v4l2_standard *)ARG3;
+      POST_MEM_WRITE((Addr)&data->id, sizeof(*data) - sizeof(data->index));
+      break;
+   }
+   case VKI_V4L2_ENUMINPUT: {
+      struct vki_v4l2_input *data = (struct vki_v4l2_input *)ARG3;
+      POST_MEM_WRITE((Addr)data->name, sizeof(*data) - sizeof(data->index));
+      break;
+   }
+   case VKI_V4L2_G_CTRL: {
+      struct vki_v4l2_control *data = (struct vki_v4l2_control *)ARG3;
+      POST_FIELD_WRITE(data->value);
+      break;
+   }
+   case VKI_V4L2_G_TUNER: {
+      struct vki_v4l2_tuner *data = (struct vki_v4l2_tuner *)ARG3;
+      POST_MEM_WRITE((Addr)data->name,
+            sizeof(*data) - sizeof(data->index) - sizeof(data->reserved));
+      break;
+   }
+   case VKI_V4L2_G_AUDIO: {
+      struct vki_v4l2_audio *data = (struct vki_v4l2_audio *)ARG3;
+      POST_MEM_WRITE((Addr)data,
+            sizeof(*data) - sizeof(data->reserved));
+      break;
+   }
+   case VKI_V4L2_QUERYCTRL: {
+      struct vki_v4l2_queryctrl *data = (struct vki_v4l2_queryctrl *)ARG3;
+      POST_MEM_WRITE((Addr)&data->type,
+            sizeof(*data) - sizeof(data->id));
+      break;
+   }
+   case VKI_V4L2_QUERYMENU: {
+      struct vki_v4l2_querymenu *data = (struct vki_v4l2_querymenu *)ARG3;
+      POST_MEM_WRITE((Addr)data->name,
+            sizeof(*data) - sizeof(data->id) - sizeof(data->index));
+      break;
+   }
+   case VKI_V4L2_G_INPUT: {
+      int *data = (int *)ARG3;
+      POST_MEM_WRITE((Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_G_EDID: {
+      struct vki_v4l2_edid *data = (struct vki_v4l2_edid *)ARG3;
+      if (data->blocks && data->edid)
+         POST_MEM_WRITE((Addr)data->edid, data->blocks * 128);
+      break;
+   }
+   case VKI_V4L2_G_OUTPUT: {
+      int *data = (int *)ARG3;
+      POST_MEM_WRITE((Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_ENUMOUTPUT: {
+      struct vki_v4l2_output *data = (struct vki_v4l2_output *)ARG3;
+      POST_MEM_WRITE((Addr)data->name, sizeof(*data) - sizeof(data->index));
+      break;
+   }
+   case VKI_V4L2_G_AUDOUT: {
+      struct vki_v4l2_audioout *data = (struct vki_v4l2_audioout *)ARG3;
+      POST_MEM_WRITE((Addr)data,
+            sizeof(*data) - sizeof(data->reserved));
+      break;
+   }
+   case VKI_V4L2_G_MODULATOR: {
+      struct vki_v4l2_modulator *data = (struct vki_v4l2_modulator *)ARG3;
+      POST_MEM_WRITE((Addr)data->name,
+            sizeof(*data) - sizeof(data->index) - sizeof(data->reserved));
+      break;
+   }
+   case VKI_V4L2_G_FREQUENCY: {
+      struct vki_v4l2_frequency *data = (struct vki_v4l2_frequency *)ARG3;
+      POST_FIELD_WRITE(data->type);
+      POST_FIELD_WRITE(data->frequency);
+      break;
+   }
+   case VKI_V4L2_CROPCAP: {
+      struct vki_v4l2_cropcap *data = (struct vki_v4l2_cropcap *)ARG3;
+      POST_MEM_WRITE((Addr)&data->bounds, sizeof(*data) - sizeof(data->type));
+      break;
+   }
+   case VKI_V4L2_G_CROP: {
+      struct vki_v4l2_crop *data = (struct vki_v4l2_crop *)ARG3;
+      POST_FIELD_WRITE(data->c);
+      break;
+   }
+   case VKI_V4L2_G_JPEGCOMP: {
+      struct vki_v4l2_jpegcompression *data = (struct vki_v4l2_jpegcompression *)ARG3;
+      POST_MEM_WRITE((Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_QUERYSTD: {
+      vki_v4l2_std_id *data = (vki_v4l2_std_id *)ARG3;
+      POST_MEM_WRITE((Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_ENUMAUDIO: {
+      struct vki_v4l2_audio *data = (struct vki_v4l2_audio *)ARG3;
+      POST_MEM_WRITE((Addr)data->name,
+            sizeof(*data) - sizeof(data->index) - sizeof(data->reserved));
+      break;
+   }
+   case VKI_V4L2_ENUMAUDOUT: {
+      struct vki_v4l2_audioout *data = (struct vki_v4l2_audioout *)ARG3;
+      POST_MEM_WRITE((Addr)data->name,
+            sizeof(*data) - sizeof(data->index) - sizeof(data->reserved));
+      break;
+   }
+   case VKI_V4L2_G_PRIORITY: {
+      __vki_u32 *data = (__vki_u32 *)ARG3;
+      POST_MEM_WRITE((Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_G_SLICED_VBI_CAP: {
+      struct vki_v4l2_sliced_vbi_cap *data = (struct vki_v4l2_sliced_vbi_cap *)ARG3;
+      POST_MEM_WRITE((Addr)data,
+            sizeof(*data) - sizeof(data->type) - sizeof(data->reserved));
+      break;
+   }
+   case VKI_V4L2_G_EXT_CTRLS: {
+      struct vki_v4l2_ext_controls *data = (struct vki_v4l2_ext_controls *)ARG3;
+      if (data->count) {
+         unsigned i;
+
+         for (i = 0; i < data->count; i++) {
+            if (data->controls[i].size)
+               POST_MEM_WRITE((Addr)data->controls[i].ptr, data->controls[i].size);
+            else
+               POST_FIELD_WRITE(data->controls[i].value64);
+         }
+      }
+      POST_FIELD_WRITE(data->error_idx);
+      break;
+   }
+   case VKI_V4L2_S_EXT_CTRLS: {
+      struct vki_v4l2_ext_controls *data = (struct vki_v4l2_ext_controls *)ARG3;
+      POST_FIELD_WRITE(data->error_idx);
+      break;
+   }
+   case VKI_V4L2_TRY_EXT_CTRLS: {
+      struct vki_v4l2_ext_controls *data = (struct vki_v4l2_ext_controls *)ARG3;
+      POST_FIELD_WRITE(data->error_idx);
+      break;
+   }
+   case VKI_V4L2_ENUM_FRAMESIZES: {
+      struct vki_v4l2_frmsizeenum *data = (struct vki_v4l2_frmsizeenum *)ARG3;
+      POST_FIELD_WRITE(data->type);
+      POST_FIELD_WRITE(data->stepwise);
+      break;
+   }
+   case VKI_V4L2_ENUM_FRAMEINTERVALS: {
+      struct vki_v4l2_frmivalenum *data = (struct vki_v4l2_frmivalenum *)ARG3;
+      POST_FIELD_WRITE(data->type);
+      POST_FIELD_WRITE(data->stepwise);
+      break;
+   }
+   case VKI_V4L2_G_ENC_INDEX: {
+      struct vki_v4l2_enc_idx *data = (struct vki_v4l2_enc_idx *)ARG3;
+      POST_MEM_WRITE((Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_ENCODER_CMD: {
+      struct vki_v4l2_encoder_cmd *data = (struct vki_v4l2_encoder_cmd *)ARG3;
+      POST_FIELD_WRITE(data->flags);
+      break;
+   }
+   case VKI_V4L2_TRY_ENCODER_CMD: {
+      struct vki_v4l2_encoder_cmd *data = (struct vki_v4l2_encoder_cmd *)ARG3;
+      POST_FIELD_WRITE(data->flags);
+      break;
+   }
+   case VKI_V4L2_DBG_S_REGISTER: {
+      struct vki_v4l2_dbg_register *data = (struct vki_v4l2_dbg_register *)ARG3;
+      POST_FIELD_WRITE(data->size);
+      break;
+   }
+   case VKI_V4L2_DBG_G_REGISTER: {
+      struct vki_v4l2_dbg_register *data = (struct vki_v4l2_dbg_register *)ARG3;
+      POST_FIELD_WRITE(data->val);
+      POST_FIELD_WRITE(data->size);
+      break;
+   }
+   case VKI_V4L2_G_DV_TIMINGS: {
+      struct vki_v4l2_dv_timings *data = (struct vki_v4l2_dv_timings *)ARG3;
+      POST_MEM_WRITE((Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_DQEVENT: {
+      struct vki_v4l2_event *data = (struct vki_v4l2_event *)ARG3;
+      POST_MEM_WRITE((Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_CREATE_BUFS: {
+      struct vki_v4l2_create_buffers *data = (struct vki_v4l2_create_buffers *)ARG3;
+      POST_FIELD_WRITE(data->index);
+      break;
+   }
+   case VKI_V4L2_G_SELECTION: {
+      struct vki_v4l2_selection *data = (struct vki_v4l2_selection *)ARG3;
+      POST_FIELD_WRITE(data->r);
+      break;
+   }
+   case VKI_V4L2_S_SELECTION: {
+      struct vki_v4l2_selection *data = (struct vki_v4l2_selection *)ARG3;
+      POST_FIELD_WRITE(data->r);
+      break;
+   }
+   case VKI_V4L2_DECODER_CMD: {
+      struct vki_v4l2_decoder_cmd *data = (struct vki_v4l2_decoder_cmd *)ARG3;
+      POST_FIELD_WRITE(data->flags);
+      break;
+   }
+   case VKI_V4L2_TRY_DECODER_CMD: {
+      struct vki_v4l2_decoder_cmd *data = (struct vki_v4l2_decoder_cmd *)ARG3;
+      POST_FIELD_WRITE(data->flags);
+      break;
+   }
+   case VKI_V4L2_ENUM_DV_TIMINGS: {
+      struct vki_v4l2_enum_dv_timings *data = (struct vki_v4l2_enum_dv_timings *)ARG3;
+      POST_FIELD_WRITE(data->timings);
+      break;
+   }
+   case VKI_V4L2_QUERY_DV_TIMINGS: {
+      struct vki_v4l2_dv_timings *data = (struct vki_v4l2_dv_timings *)ARG3;
+      POST_MEM_WRITE((Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_DV_TIMINGS_CAP: {
+      struct vki_v4l2_dv_timings_cap *data = (struct vki_v4l2_dv_timings_cap *)ARG3;
+      POST_MEM_WRITE((Addr)data, sizeof(*data));
+      break;
+   }
+   case VKI_V4L2_ENUM_FREQ_BANDS: {
+      struct vki_v4l2_frequency_band *data = (struct vki_v4l2_frequency_band *)ARG3;
+      POST_FIELD_WRITE(data->capability);
+      POST_FIELD_WRITE(data->rangelow);
+      POST_FIELD_WRITE(data->rangehigh);
+      POST_FIELD_WRITE(data->modulation);
+      break;
+   }
+   case VKI_V4L2_DBG_G_CHIP_INFO: {
+      struct vki_v4l2_dbg_chip_info *data = (struct vki_v4l2_dbg_chip_info *)ARG3;
+      POST_FIELD_WRITE(data->name);
+      POST_FIELD_WRITE(data->flags);
+      break;
+   }
+   case VKI_V4L2_QUERY_EXT_CTRL: {
+      struct vki_v4l2_query_ext_ctrl *data = (struct vki_v4l2_query_ext_ctrl *)ARG3;
+      POST_MEM_WRITE((Addr)&data->type,
+            sizeof(*data) - sizeof(data->id) - sizeof(data->reserved));
+      break;
+   }
+
+   case VKI_V4L2_SUBDEV_S_FMT:
+   case VKI_V4L2_SUBDEV_S_FRAME_INTERVAL:
+   case VKI_V4L2_SUBDEV_S_CROP:
+   case VKI_V4L2_SUBDEV_S_SELECTION:
+      break;
+
+   case VKI_V4L2_SUBDEV_G_FMT: {
+      struct vki_v4l2_subdev_format *data = (struct vki_v4l2_subdev_format *)ARG3;
+      POST_FIELD_WRITE(data->format);
+      break;
+   }
+   case VKI_V4L2_SUBDEV_G_FRAME_INTERVAL: {
+      struct vki_v4l2_subdev_frame_interval *data = (struct vki_v4l2_subdev_frame_interval *)ARG3;
+      POST_FIELD_WRITE(data->interval);
+      break;
+   }
+   case VKI_V4L2_SUBDEV_ENUM_MBUS_CODE: {
+      struct vki_v4l2_subdev_mbus_code_enum *data = (struct vki_v4l2_subdev_mbus_code_enum *)ARG3;
+      POST_FIELD_WRITE(data->code);
+      break;
+   }
+   case VKI_V4L2_SUBDEV_ENUM_FRAME_SIZE: {
+      struct vki_v4l2_subdev_frame_size_enum *data = (struct vki_v4l2_subdev_frame_size_enum *)ARG3;
+      POST_FIELD_WRITE(data->min_width);
+      POST_FIELD_WRITE(data->min_height);
+      POST_FIELD_WRITE(data->max_width);
+      POST_FIELD_WRITE(data->max_height);
+      break;
+   }
+   case VKI_V4L2_SUBDEV_ENUM_FRAME_INTERVAL: {
+      struct vki_v4l2_subdev_frame_interval_enum *data = (struct vki_v4l2_subdev_frame_interval_enum *)ARG3;
+      POST_FIELD_WRITE(data->interval);
+      break;
+   }
+   case VKI_V4L2_SUBDEV_G_CROP: {
+      struct vki_v4l2_subdev_crop *data = (struct vki_v4l2_subdev_crop *)ARG3;
+      POST_FIELD_WRITE(data->rect);
+      break;
+   }
+   case VKI_V4L2_SUBDEV_G_SELECTION: {
+      struct vki_v4l2_subdev_selection *data = (struct vki_v4l2_subdev_selection *)ARG3;
+      POST_FIELD_WRITE(data->r);
+      break;
+   }
+   case VKI_MEDIA_IOC_DEVICE_INFO: {
+      struct vki_media_device_info *data = (struct vki_media_device_info *)ARG3;
+      POST_MEM_WRITE((Addr)data, sizeof(*data) - sizeof(data->reserved));
+      break;
+   }
+   case VKI_MEDIA_IOC_ENUM_ENTITIES: {
+      struct vki_media_entity_desc *data = (struct vki_media_entity_desc *)ARG3;
+      POST_MEM_WRITE((Addr)data->name, sizeof(*data) - sizeof(data->id));
+      break;
+   }
+   case VKI_MEDIA_IOC_ENUM_LINKS:
+      /*
+       * This ioctl does write to the provided pointers, but it's not
+       * possible to deduce the size of the array those pointers point to.
+       */
+      break;
+   case VKI_MEDIA_IOC_SETUP_LINK:
+      break;
 
    default:
       /* EVIOC* are variable length and return size written on success */
@@ -8068,6 +10208,9 @@ POST(sys_ioctl)
       }
       break;
    }
+
+  post_sys_ioctl__out:
+   {} /* keep C compilers happy */
 }
 
 /* ---------------------------------------------------------------------
@@ -8187,6 +10330,69 @@ ML_(linux_PRE_sys_setsockopt) ( ThreadId tid,
    }
 }
 
+void
+ML_(linux_PRE_sys_recvmmsg) ( ThreadId tid,
+                              UWord arg1, UWord arg2, UWord arg3,
+                              UWord arg4, UWord arg5 )
+{
+   struct vki_mmsghdr *mmsg = (struct vki_mmsghdr *)arg2;
+   HChar name[40];     // large enough
+   UInt i;
+   for (i = 0; i < arg3; i++) {
+      VG_(sprintf)(name, "mmsg[%u].msg_hdr", i);
+      ML_(generic_PRE_sys_recvmsg)(tid, name, &mmsg[i].msg_hdr);
+      VG_(sprintf)(name, "recvmmsg(mmsg[%u].msg_len)", i);
+      PRE_MEM_WRITE( name, (Addr)&mmsg[i].msg_len, sizeof(mmsg[i].msg_len) );
+   }
+   if (arg5)
+      PRE_MEM_READ( "recvmmsg(timeout)", arg5, sizeof(struct vki_timespec) );
+}
+
+void
+ML_(linux_POST_sys_recvmmsg) (ThreadId tid, UWord res,
+                              UWord arg1, UWord arg2, UWord arg3,
+                              UWord arg4, UWord arg5 )
+{
+   if (res > 0) {
+      struct vki_mmsghdr *mmsg = (struct vki_mmsghdr *)arg2;
+      HChar name[32];    // large enough
+      UInt i;
+      for (i = 0; i < res; i++) {
+         VG_(sprintf)(name, "mmsg[%u].msg_hdr", i);
+         ML_(generic_POST_sys_recvmsg)(tid, name, &mmsg[i].msg_hdr, mmsg[i].msg_len);
+         POST_MEM_WRITE( (Addr)&mmsg[i].msg_len, sizeof(mmsg[i].msg_len) );
+      }
+   }
+}
+
+void
+ML_(linux_PRE_sys_sendmmsg) ( ThreadId tid,
+                              UWord arg1, UWord arg2, UWord arg3, UWord arg4 )
+{
+   struct vki_mmsghdr *mmsg = (struct vki_mmsghdr *)arg2;
+   HChar name[40];     // large enough
+   UInt i;
+   for (i = 0; i < arg3; i++) {
+      VG_(sprintf)(name, "mmsg[%u].msg_hdr", i);
+      ML_(generic_PRE_sys_sendmsg)(tid, name, &mmsg[i].msg_hdr);
+      VG_(sprintf)(name, "sendmmsg(mmsg[%u].msg_len)", i);
+      PRE_MEM_WRITE( name, (Addr)&mmsg[i].msg_len, sizeof(mmsg[i].msg_len) );
+   }
+}
+
+void
+ML_(linux_POST_sys_sendmmsg) (ThreadId tid, UWord res,
+                              UWord arg1, UWord arg2, UWord arg3, UWord arg4 )
+{
+   if (res > 0) {
+      struct vki_mmsghdr *mmsg = (struct vki_mmsghdr *)arg2;
+      UInt i;
+      for (i = 0; i < res; i++) {
+         POST_MEM_WRITE( (Addr)&mmsg[i].msg_len, sizeof(mmsg[i].msg_len) );
+      }
+   }
+}
+
 /* ---------------------------------------------------------------------
    ptrace wrapper helpers
    ------------------------------------------------------------------ */
@@ -8225,6 +10431,26 @@ ML_(linux_POST_getregset) ( ThreadId tid, long arg3, long arg4 )
    /* XXX: The actual amount of data written by the kernel might be
       less than iov_len, depending on the regset (arg3). */
    POST_MEM_WRITE((unsigned long) iov->iov_base, iov->iov_len);
+}
+
+PRE(sys_kcmp)
+{
+   PRINT("kcmp ( %ld, %ld, %ld, %lu, %lu )", ARG1, ARG2, ARG3, ARG4, ARG5);
+   switch (ARG3) {
+      case VKI_KCMP_VM: case VKI_KCMP_FILES: case VKI_KCMP_FS:
+      case VKI_KCMP_SIGHAND: case VKI_KCMP_IO: case VKI_KCMP_SYSVSEM:
+         /* Most of the comparison types don't look at |idx1| or
+            |idx2|. */
+         PRE_REG_READ3(long, "kcmp",
+                       vki_pid_t, pid1, vki_pid_t, pid2, int, type);
+         break;
+      case VKI_KCMP_FILE:
+      default:
+         PRE_REG_READ5(long, "kcmp",
+                       vki_pid_t, pid1, vki_pid_t, pid2, int, type,
+                       unsigned long, idx1, unsigned long, idx2);
+         break;
+   }
 }
 
 #undef PRE

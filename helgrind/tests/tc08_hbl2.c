@@ -29,9 +29,11 @@
 #undef PLAT_ppc32_linux
 #undef PLAT_ppc64_linux
 #undef PLAT_arm_linux
+#undef PLAT_arm64_linux
 #undef PLAT_s390x_linux
 #undef PLAT_mips32_linux
 #undef PLAT_mips64_linux
+#undef PLAT_tilegx_linux
 
 #if defined(__APPLE__) && defined(__i386__)
 #  define PLAT_x86_darwin 1
@@ -45,8 +47,10 @@
 #  define PLAT_ppc32_linux 1
 #elif defined(__linux__) && defined(__powerpc__) && defined(__powerpc64__)
 #  define PLAT_ppc64_linux 1
-#elif defined(__linux__) && defined(__arm__)
+#elif defined(__linux__) && defined(__arm__) && !defined(__aarch64__)
 #  define PLAT_arm_linux 1
+#elif defined(__linux__) && defined(__aarch64__) && !defined(__arm__)
+#  define PLAT_arm64_linux 1
 #elif defined(__linux__) && defined(__s390x__)
 #  define PLAT_s390x_linux 1
 #elif defined(__linux__) && defined(__mips__)
@@ -55,6 +59,8 @@
 #else
 #  define PLAT_mips32_linux 1
 #endif
+#elif defined(__linux__) && defined(__tilegx__)
+#  define PLAT_tilegx_linux 1
 #endif
 
 
@@ -86,6 +92,18 @@
       : /*out*/ : /*in*/ "r"(&(_lval))       \
       : /*trash*/ "r8", "r9", "cc", "memory" \
   );
+#elif defined(PLAT_arm64_linux)
+#  define INC(_lval,_lqual) \
+  __asm__ __volatile__( \
+      "1:\n"                                 \
+      "        ldxr  w8, [%0, #0]\n"         \
+      "        add   w8, w8, #1\n"           \
+      "        stxr  w9, w8, [%0, #0]\n"     \
+      "        cmp   w9, #0\n"               \
+      "        bne   1b\n"                   \
+      : /*out*/ : /*in*/ "r"(&(_lval))       \
+      : /*trash*/ "x8", "x9", "cc", "memory" \
+  );
 #elif defined(PLAT_s390x_linux)
 #  define INC(_lval,_lqual) \
    __asm__ __volatile__( \
@@ -108,6 +126,12 @@
       : /*out*/ : /*in*/ "r"(&(_lval))              \
       : /*trash*/ "t0", "t1", "memory"              \
         )
+#elif defined(PLAT_tilegx_linux)
+#  define INC(_lval,_lqual)                     \
+  if (sizeof(_lval) == 4)                       \
+    __insn_fetchadd(&(_lval), 1);               \
+  else if(sizeof(_lval) == 8)                   \
+    __insn_fetchadd(&(_lval), 1)
 #else
 #  error "Fix Me for this platform"
 #endif

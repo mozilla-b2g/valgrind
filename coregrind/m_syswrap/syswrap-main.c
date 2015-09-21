@@ -34,7 +34,6 @@
 #include "pub_core_aspacemgr.h"
 #include "pub_core_vki.h"
 #include "pub_core_vkiscnums.h"
-#include "pub_core_libcsetjmp.h"    // to keep _threadstate.h happy
 #include "pub_core_threadstate.h"
 #include "pub_core_libcbase.h"
 #include "pub_core_libcassert.h"
@@ -49,6 +48,7 @@
 #include "pub_core_signals.h"       // For VG_SIGVGKILL, VG_(poll_signals)
 #include "pub_core_syscall.h"
 #include "pub_core_machine.h"
+#include "pub_core_mallocfree.h"
 #include "pub_core_syswrap.h"
 
 #include "priv_types_n_macros.h"
@@ -80,9 +80,10 @@
    fills in the immediate field.
    s390x r1/SVC r2   r3   r4   r5   r6   r7   n/a  n/a  r2        (== ARG1)
 
+          NUM   ARG1 ARG2 ARG3 ARG4 ARG5 ARG6 ARG7 ARG8 RESULT
    DARWIN:
-   x86    eax +4   +8   +12  +16  +20  +24  +28  +32  edx:eax, eflags.c
-   amd64  rax rdi  rsi  rdx  rcx  r8   r9   +8   +16  rdx:rax, rflags.c
+   x86    eax   +4   +8   +12  +16  +20  +24  +28  +32  edx:eax, eflags.c
+   amd64  rax   rdi  rsi  rdx  rcx  r8   r9   +8   +16  rdx:rax, rflags.c
 
    For x86-darwin, "+N" denotes "in memory at N(%esp)"; ditto
    amd64-darwin.  Apparently 0(%esp) is some kind of return address
@@ -441,7 +442,7 @@ void getSyscallArgsFromGuestState ( /*OUT*/SyscallArgs*       canonical,
    canonical->arg7  = 0;
    canonical->arg8  = 0;
 
-#elif defined(VGP_ppc64_linux)
+#elif defined(VGP_ppc64be_linux) || defined(VGP_ppc64le_linux)
    VexGuestPPC64State* gst = (VexGuestPPC64State*)gst_vanilla;
    canonical->sysno = gst->guest_GPR0;
    canonical->arg1  = gst->guest_GPR3;
@@ -551,9 +552,9 @@ void getSyscallArgsFromGuestState ( /*OUT*/SyscallArgs*       canonical,
       canonical->arg7  = stack[8];
       canonical->arg8  = stack[9];
       
-      PRINT("SYSCALL[%d,?](%s) syscall(%s, ...); please stand by...\n",
+      PRINT("SYSCALL[%d,?](0) syscall(%s, ...); please stand by...\n",
             VG_(getpid)(), /*tid,*/
-            VG_SYSNUM_STRING(0), VG_SYSNUM_STRING(canonical->sysno));
+            VG_SYSNUM_STRING(canonical->sysno));
    }
 
    // Here we determine what kind of syscall it was by looking at the
@@ -630,9 +631,9 @@ void getSyscallArgsFromGuestState ( /*OUT*/SyscallArgs*       canonical,
       canonical->arg7  = stack[2];
       canonical->arg8  = stack[3];
       
-      PRINT("SYSCALL[%d,?](%s) syscall(%s, ...); please stand by...\n",
+      PRINT("SYSCALL[%d,?](0) syscall(%s, ...); please stand by...\n",
             VG_(getpid)(), /*tid,*/
-            VG_SYSNUM_STRING(0), VG_SYSNUM_STRING(canonical->sysno));
+            VG_SYSNUM_STRING(canonical->sysno));
    }
 
    // no canonical->sysno adjustment needed
@@ -648,6 +649,19 @@ void getSyscallArgsFromGuestState ( /*OUT*/SyscallArgs*       canonical,
    canonical->arg6  = gst->guest_r7;
    canonical->arg7  = 0;
    canonical->arg8  = 0;
+
+#elif defined(VGP_tilegx_linux)
+   VexGuestTILEGXState* gst = (VexGuestTILEGXState*)gst_vanilla;
+   canonical->sysno = gst->guest_r10;
+   canonical->arg1  = gst->guest_r0;
+   canonical->arg2  = gst->guest_r1;
+   canonical->arg3  = gst->guest_r2;
+   canonical->arg4  = gst->guest_r3;
+   canonical->arg5  = gst->guest_r4;
+   canonical->arg6  = gst->guest_r5;
+   canonical->arg7  = 0;
+   canonical->arg8  = 0;
+
 #else
 #  error "getSyscallArgsFromGuestState: unknown arch"
 #endif
@@ -687,7 +701,7 @@ void putSyscallArgsIntoGuestState ( /*IN*/ SyscallArgs*       canonical,
    gst->guest_GPR7 = canonical->arg5;
    gst->guest_GPR8 = canonical->arg6;
 
-#elif defined(VGP_ppc64_linux)
+#elif defined(VGP_ppc64be_linux) || defined(VGP_ppc64le_linux)
    VexGuestPPC64State* gst = (VexGuestPPC64State*)gst_vanilla;
    gst->guest_GPR0 = canonical->sysno;
    gst->guest_GPR3 = canonical->arg1;
@@ -792,6 +806,17 @@ void putSyscallArgsIntoGuestState ( /*IN*/ SyscallArgs*       canonical,
    gst->guest_r7 = canonical->arg4;
    gst->guest_r8 = canonical->arg5;
    gst->guest_r9 = canonical->arg6;
+
+#elif defined(VGP_tilegx_linux)
+   VexGuestTILEGXState* gst = (VexGuestTILEGXState*)gst_vanilla;
+   gst->guest_r10 = canonical->sysno;
+   gst->guest_r0 = canonical->arg1;
+   gst->guest_r1 = canonical->arg2;
+   gst->guest_r2 = canonical->arg3;
+   gst->guest_r3 = canonical->arg4;
+   gst->guest_r4 = canonical->arg5;
+   gst->guest_r5 = canonical->arg6;
+
 #else
 #  error "putSyscallArgsIntoGuestState: unknown arch"
 #endif
@@ -818,7 +843,7 @@ void getSyscallStatusFromGuestState ( /*OUT*/SyscallStatus*     canonical,
    canonical->sres = VG_(mk_SysRes_ppc32_linux)( gst->guest_GPR3, cr0so );
    canonical->what = SsComplete;
 
-#  elif defined(VGP_ppc64_linux)
+#  elif defined(VGP_ppc64be_linux) || defined(VGP_ppc64le_linux)
    VexGuestPPC64State* gst   = (VexGuestPPC64State*)gst_vanilla;
    UInt                cr    = LibVEX_GuestPPC64_get_CR( gst );
    UInt                cr0so = (cr >> 28) & 1;
@@ -920,6 +945,11 @@ void getSyscallStatusFromGuestState ( /*OUT*/SyscallStatus*     canonical,
    canonical->sres = VG_(mk_SysRes_s390x_linux)( gst->guest_r2 );
    canonical->what = SsComplete;
 
+#  elif defined(VGP_tilegx_linux)
+   VexGuestTILEGXState* gst = (VexGuestTILEGXState*)gst_vanilla;
+   canonical->sres = VG_(mk_SysRes_tilegx_linux)( gst->guest_r0 );
+   canonical->what = SsComplete;
+
 #  else
 #    error "getSyscallStatusFromGuestState: unknown arch"
 #  endif
@@ -976,7 +1006,7 @@ void putSyscallStatusIntoGuestState ( /*IN*/ ThreadId tid,
    VG_TRACK( post_reg_write, Vg_CoreSysCall, tid, 
              OFFSET_ppc32_CR0_0, sizeof(UChar) );
 
-#  elif defined(VGP_ppc64_linux)
+#  elif defined(VGP_ppc64be_linux) || defined(VGP_ppc64le_linux)
    VexGuestPPC64State* gst = (VexGuestPPC64State*)gst_vanilla;
    UInt old_cr = LibVEX_GuestPPC64_get_CR(gst);
    vg_assert(canonical->what == SsComplete);
@@ -1133,6 +1163,18 @@ void putSyscallStatusIntoGuestState ( /*IN*/ ThreadId tid,
    VG_TRACK( post_reg_write, Vg_CoreSysCall, tid,
              OFFSET_mips64_r7, sizeof(UWord) );
 
+#  elif defined(VGP_tilegx_linux)
+   VexGuestTILEGXState* gst = (VexGuestTILEGXState*)gst_vanilla;
+   vg_assert(canonical->what == SsComplete);
+   if (sr_isError(canonical->sres)) {
+      gst->guest_r0 = - (Long)sr_Err(canonical->sres);
+      // r1 hold errno
+      gst->guest_r1 = (Long)sr_Err(canonical->sres);
+   } else {
+      gst->guest_r0 = sr_Res(canonical->sres);
+      gst->guest_r1 = 0;
+   }
+
 #  else
 #    error "putSyscallStatusIntoGuestState: unknown arch"
 #  endif
@@ -1181,7 +1223,7 @@ void getSyscallArgLayout ( /*OUT*/SyscallArgLayout* layout )
    layout->uu_arg7  = -1; /* impossible value */
    layout->uu_arg8  = -1; /* impossible value */
 
-#elif defined(VGP_ppc64_linux)
+#elif defined(VGP_ppc64be_linux) || defined(VGP_ppc64le_linux)
    layout->o_sysno  = OFFSET_ppc64_GPR0;
    layout->o_arg1   = OFFSET_ppc64_GPR3;
    layout->o_arg2   = OFFSET_ppc64_GPR4;
@@ -1269,6 +1311,17 @@ void getSyscallArgLayout ( /*OUT*/SyscallArgLayout* layout )
    layout->o_arg6   = OFFSET_s390x_r7;
    layout->uu_arg7  = -1; /* impossible value */
    layout->uu_arg8  = -1; /* impossible value */
+#elif defined(VGP_tilegx_linux)
+   layout->o_sysno  = OFFSET_tilegx_r(10);
+   layout->o_arg1   = OFFSET_tilegx_r(0);
+   layout->o_arg2   = OFFSET_tilegx_r(1);
+   layout->o_arg3   = OFFSET_tilegx_r(2);
+   layout->o_arg4   = OFFSET_tilegx_r(3);
+   layout->o_arg5   = OFFSET_tilegx_r(4);
+   layout->o_arg6   = OFFSET_tilegx_r(5);
+   layout->uu_arg7  = -1; /* impossible value */
+   layout->uu_arg8  = -1; /* impossible value */
+
 #else
 #  error "getSyscallLayout: unknown arch"
 #endif
@@ -1289,8 +1342,8 @@ void bad_before ( ThreadId              tid,
                   /*OUT*/SyscallStatus* status,
                   /*OUT*/UWord*         flags )
 {
-   VG_(dmsg)("WARNING: unhandled syscall: %s\n",
-      VG_SYSNUM_STRING_EXTRA(args->sysno));
+   VG_(dmsg)("WARNING: unhandled %s syscall: %s\n",
+      VG_PLATFORM, VG_SYSNUM_STRING(args->sysno));
    if (VG_(clo_verbosity) > 1) {
       VG_(get_and_pp_StackTrace)(tid, VG_(clo_backtrace_size));
    }
@@ -1363,16 +1416,22 @@ typedef
    }
    SyscallInfo;
 
-SyscallInfo syscallInfo[VG_N_THREADS];
-
+SyscallInfo *syscallInfo;
 
 /* The scheduler needs to be able to zero out these records after a
    fork, hence this is exported from m_syswrap. */
 void VG_(clear_syscallInfo) ( Int tid )
 {
+   vg_assert(syscallInfo);
    vg_assert(tid >= 0 && tid < VG_N_THREADS);
    VG_(memset)( & syscallInfo[tid], 0, sizeof( syscallInfo[tid] ));
    syscallInfo[tid].status.what = SsIdle;
+}
+
+Bool VG_(is_in_syscall) ( Int tid )
+{
+   vg_assert(tid >= 0 && tid < VG_N_THREADS);
+   return (syscallInfo[tid].status.what != SsIdle);
 }
 
 static void ensure_initialised ( void )
@@ -1382,6 +1441,9 @@ static void ensure_initialised ( void )
    if (init_done) 
       return;
    init_done = True;
+
+   syscallInfo = VG_(malloc)("scinfo", VG_N_THREADS * sizeof syscallInfo[0]);
+
    for (i = 0; i < VG_N_THREADS; i++) {
       VG_(clear_syscallInfo)( i );
    }
@@ -1402,6 +1464,11 @@ void VG_(client_syscall) ( ThreadId tid, UInt trc )
    vg_assert(VG_(is_valid_tid)(tid));
    vg_assert(tid >= 1 && tid < VG_N_THREADS);
    vg_assert(VG_(is_running_thread)(tid));
+
+#  if !defined(VGO_darwin)
+   // Resync filtering is meaningless on non-Darwin targets.
+   vg_assert(VG_(clo_resync_filter) == 0);
+#  endif
 
    tst = VG_(get_ThreadState)(tid);
 
@@ -1454,40 +1521,37 @@ void VG_(client_syscall) ( ThreadId tid, UInt trc )
       possible valid address for stack (sp - redzone), to ensure the
       pages all the way down to that address, are mapped.  Because
       this is a potentially expensive and frequent operation, we
-      filter in two ways:
+      do the following:
 
-      First, only the main thread (tid=1) has a growdown stack.  So
+      Only the main thread (tid=1) has a growdown stack.  So
       ignore all others.  It is conceivable, although highly unlikely,
       that the main thread exits, and later another thread is
       allocated tid=1, but that's harmless, I believe;
       VG_(extend_stack) will do nothing when applied to a non-root
       thread.
 
-      Secondly, first call VG_(am_find_nsegment) directly, to see if
-      the page holding (sp - redzone) is mapped correctly.  If so, do
-      nothing.  This is almost always the case.  VG_(extend_stack)
-      calls VG_(am_find_nsegment) twice, so this optimisation -- and
-      that's all it is -- more or less halves the number of calls to
-      VG_(am_find_nsegment) required.
-
-      TODO: the test "seg->kind == SkAnonC" is really inadequate,
-      because although it tests whether the segment is mapped
-      _somehow_, it doesn't check that it has the right permissions
-      (r,w, maybe x) ?  We could test that here, but it will also be
-      necessary to fix the corresponding test in VG_(extend_stack).
-
       All this guff is of course Linux-specific.  Hence the ifdef.
    */
 #  if defined(VGO_linux)
    if (tid == 1/*ROOT THREAD*/) {
       Addr     stackMin   = VG_(get_SP)(tid) - VG_STACK_REDZONE_SZB;
-      NSegment const* seg = VG_(am_find_nsegment)(stackMin);
-      if (seg && seg->kind == SkAnonC) {
-         /* stackMin is already mapped.  Nothing to do. */
-      } else {
-         (void)VG_(extend_stack)( stackMin,
-                                  tst->client_stack_szB );
-      }
+
+      /* The precise thing to do here would be to extend the stack only
+         if the system call can be proven to access unmapped user stack
+         memory. That is an enormous amount of work even if a proper
+         spec of system calls was available. 
+
+         In the case where the system call does not access user memory
+         the stack pointer here can have any value. A legitimate testcase
+         that exercises this is none/tests/s390x/stmg.c:
+         The stack pointer happens to be in the reservation segment near
+         the end of the addressable memory and there is no SkAnonC segment
+         above.
+
+         So the approximation we're taking here is to extend the stack only
+         if the client stack pointer does not look bogus. */
+      if (VG_(am_addr_is_in_extensible_client_stack)(stackMin))
+         VG_(extend_stack)( tid, stackMin );
    }
 #  endif
    /* END ensure root thread's stack is suitably mapped */
@@ -1605,9 +1669,7 @@ void VG_(client_syscall) ( ThreadId tid, UInt trc )
       if (sci->flags & SfNoWriteResult) {
          PRINT(" --> [pre-success] NoWriteResult");
       } else {
-         PRINT(" --> [pre-success] Success(0x%llx:0x%llx)",
-               (ULong)sr_ResHI(sci->status.sres),
-               (ULong)sr_Res(sci->status.sres));
+         PRINT(" --> [pre-success] %s", VG_(sr_as_string)(sci->status.sres));
       }                                      
       /* In this case the allowable flags are to ask for a signal-poll
          and/or a yield after the call.  Changing the args isn't
@@ -1620,7 +1682,7 @@ void VG_(client_syscall) ( ThreadId tid, UInt trc )
    else
    if (sci->status.what == SsComplete && sr_isError(sci->status.sres)) {
       /* The pre-handler decided to fail syscall itself. */
-      PRINT(" --> [pre-fail] Failure(0x%llx)", (ULong)sr_Err(sci->status.sres));
+      PRINT(" --> [pre-fail] %s", VG_(sr_as_string)(sci->status.sres));
       /* In this case, the pre-handler is also allowed to ask for the
          post-handler to be run anyway.  Changing the args is not
          allowed. */
@@ -1705,18 +1767,9 @@ void VG_(client_syscall) ( ThreadId tid, UInt trc )
 
          /* Be decorative, if required. */
          if (VG_(clo_trace_syscalls)) {
-            Bool failed = sr_isError(sci->status.sres);
-            if (failed) {
-               PRINT("SYSCALL[%d,%d](%s) ... [async] --> Failure(0x%llx)",
-                     VG_(getpid)(), tid, VG_SYSNUM_STRING(sysno),
-                     (ULong)sr_Err(sci->status.sres));
-            } else {
-               PRINT("SYSCALL[%d,%d](%s) ... [async] --> "
-                     "Success(0x%llx:0x%llx)",
-                     VG_(getpid)(), tid, VG_SYSNUM_STRING(sysno),
-                     (ULong)sr_ResHI(sci->status.sres),
-                     (ULong)sr_Res(sci->status.sres) );
-            }
+            PRINT("SYSCALL[%d,%d](%s) ... [async] --> %s",
+                  VG_(getpid)(), tid, VG_SYSNUM_STRING(sysno),
+                  VG_(sr_as_string)(sci->status.sres));
          }
 
       } else {
@@ -1736,15 +1789,7 @@ void VG_(client_syscall) ( ThreadId tid, UInt trc )
 
          /* Be decorative, if required. */
          if (VG_(clo_trace_syscalls)) {
-            Bool failed = sr_isError(sci->status.sres);
-            if (failed) {
-               PRINT("[sync] --> Failure(0x%llx)",
-                     (ULong)sr_Err(sci->status.sres) );
-            } else {
-               PRINT("[sync] --> Success(0x%llx:0x%llx)",
-                     (ULong)sr_ResHI(sci->status.sres),
-                     (ULong)sr_Res(sci->status.sres) );
-            }
+           PRINT("[sync] --> %s", VG_(sr_as_string)(sci->status.sres));
          }
       }
    }
@@ -1987,7 +2032,7 @@ void ML_(fixup_guest_state_to_restart_syscall) ( ThreadArchState* arch )
       vg_assert(p[0] == 0x0F && p[1] == 0x05);
    }
 
-#elif defined(VGP_ppc32_linux) || defined(VGP_ppc64_linux)
+#elif defined(VGP_ppc32_linux) || defined(VGP_ppc64be_linux)
    arch->vex.guest_CIA -= 4;             // sizeof(ppc32 instr)
 
    /* Make sure our caller is actually sane, and we're really backing
@@ -2004,6 +2049,25 @@ void ML_(fixup_guest_state_to_restart_syscall) ( ThreadArchState* arch )
                       arch->vex.guest_CIA + 0ULL, p[0], p[1], p[2], p[3]);
 
       vg_assert(p[0] == 0x44 && p[1] == 0x0 && p[2] == 0x0 && p[3] == 0x2);
+   }
+
+#elif defined(VGP_ppc64le_linux)
+   arch->vex.guest_CIA -= 4;             // sizeof(ppc32 instr)
+
+   /* Make sure our caller is actually sane, and we're really backing
+      back over a syscall.
+
+      sc == 44 00 00 02
+   */
+   {
+      UChar *p = (UChar *)arch->vex.guest_CIA;
+
+      if (p[3] != 0x44 || p[2] != 0x0 || p[1] != 0x0 || p[0] != 0x02)
+         VG_(message)(Vg_DebugMsg,
+                      "?! restarting over syscall at %#llx %02x %02x %02x %02x\n",
+                      arch->vex.guest_CIA + 0ULL, p[3], p[2], p[1], p[0]);
+
+      vg_assert(p[3] == 0x44 && p[2] == 0x0 && p[1] == 0x0 && p[0] == 0x2);
    }
 
 #elif defined(VGP_arm_linux)
@@ -2142,6 +2206,21 @@ void ML_(fixup_guest_state_to_restart_syscall) ( ThreadArchState* arch )
 #     else
 #        error "Unknown endianness"
 #     endif
+   }
+#elif defined(VGP_tilegx_linux)
+   arch->vex.guest_pc -= 8;             // sizeof({ swint1 })
+
+   /* Make sure our caller is actually sane, and we're really backing
+      back over a syscall. no other instruction in same bundle.
+   */
+   {
+      unsigned long *p = (unsigned long *)arch->vex.guest_pc;
+
+      if (p[0] != 0x286b180051485000ULL )  // "swint1", little enidan only
+         VG_(message)(Vg_DebugMsg,
+                      "?! restarting over syscall at 0x%lx %lx\n",
+                      arch->vex.guest_pc, p[0]);
+      vg_assert(p[0] == 0x286b180051485000ULL);
    }
 
 #else
@@ -2379,6 +2458,8 @@ void ML_(wqthread_continue_NORETURN)(ThreadId tid)
    sci->status = convert_SysRes_to_SyscallStatus( VG_(mk_SysRes_Success)(0) );
    sci->flags |= SfNoWriteResult;
    VG_(post_syscall)(tid);
+
+   ML_(sync_mappings)("in", "ML_(wqthread_continue_NORETURN)", 0);
 
    sci->status.what = SsIdle;
 

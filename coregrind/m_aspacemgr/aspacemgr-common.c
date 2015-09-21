@@ -54,14 +54,7 @@
 __attribute__ ((noreturn))
 void ML_(am_exit)( Int status )
 {
-#  if defined(VGO_linux)
-   (void)VG_(do_syscall1)(__NR_exit_group, status);
-#  endif
-   (void)VG_(do_syscall1)(__NR_exit, status);
-   /* Why are we still alive here? */
-   /*NOTREACHED*/
-   *(volatile Int *)0 = 'x';
-   aspacem_assert(2+2 == 5);
+   VG_(exit_now) (status);
 }
 
 void ML_(am_barf) ( const HChar* what )
@@ -162,9 +155,11 @@ SysRes VG_(am_do_mmap_NO_NOTIFY)( Addr start, SizeT length, UInt prot,
    aspacem_assert((offset % 4096) == 0);
    res = VG_(do_syscall6)(__NR_mmap2, (UWord)start, length,
                           prot, flags, fd, offset / 4096);
-#  elif defined(VGP_amd64_linux) || defined(VGP_ppc64_linux) \
+#  elif defined(VGP_amd64_linux) \
+        || defined(VGP_ppc64be_linux)  || defined(VGP_ppc64le_linux) \
         || defined(VGP_s390x_linux) || defined(VGP_mips32_linux) \
-        || defined(VGP_mips64_linux) || defined(VGP_arm64_linux)
+        || defined(VGP_mips64_linux) || defined(VGP_arm64_linux) \
+        || defined(VGP_tilegx_linux)
    res = VG_(do_syscall6)(__NR_mmap, (UWord)start, length, 
                          prot, flags, fd, offset);
 #  elif defined(VGP_x86_darwin)
@@ -251,6 +246,9 @@ SysRes ML_(am_open) ( const HChar* pathname, Int flags, Int mode )
    /* ARM64 wants to use __NR_openat rather than __NR_open. */
    SysRes res = VG_(do_syscall4)(__NR_openat,
                                  VKI_AT_FDCWD, (UWord)pathname, flags, mode);
+#  elif defined(VGP_tilegx_linux)
+   SysRes res = VG_(do_syscall4)(__NR_openat, VKI_AT_FDCWD, (UWord)pathname,
+                                 flags, mode);
 #  else
    SysRes res = VG_(do_syscall3)(__NR_open, (UWord)pathname, flags, mode);
 #  endif
@@ -268,12 +266,15 @@ void ML_(am_close) ( Int fd )
    (void)VG_(do_syscall1)(__NR_close, fd);
 }
 
-Int ML_(am_readlink)(HChar* path, HChar* buf, UInt bufsiz)
+Int ML_(am_readlink)(const HChar* path, HChar* buf, UInt bufsiz)
 {
    SysRes res;
 #  if defined(VGP_arm64_linux)
    res = VG_(do_syscall4)(__NR_readlinkat, VKI_AT_FDCWD,
                                            (UWord)path, (UWord)buf, bufsiz);
+#  elif defined(VGP_tilegx_linux)
+   res = VG_(do_syscall4)(__NR_readlinkat, VKI_AT_FDCWD, (UWord)path,
+                          (UWord)buf, bufsiz);
 #  else
    res = VG_(do_syscall3)(__NR_readlink, (UWord)path, (UWord)buf, bufsiz);
 #  endif
@@ -327,7 +328,7 @@ Bool ML_(am_resolve_filename) ( Int fd, /*OUT*/HChar* buf, Int nbuf )
 {
 #if defined(VGO_linux)
    Int i;
-   HChar tmp[64];
+   HChar tmp[64];    // large enough
    for (i = 0; i < nbuf; i++) buf[i] = 0;
    ML_(am_sprintf)(tmp, "/proc/self/fd/%d", fd);
    if (ML_(am_readlink)(tmp, buf, nbuf) > 0 && buf[0] == '/')
@@ -359,6 +360,11 @@ Bool ML_(am_resolve_filename) ( Int fd, /*OUT*/HChar* buf, Int nbuf )
 /*--- Manage stacks for Valgrind itself.                        ---*/
 /*---                                                           ---*/
 /*-----------------------------------------------------------------*/
+struct _VgStack {
+   HChar bytes[1];
+   // We use a fake size of 1. A bigger size is allocated
+   // by VG_(am_alloc_VgStack).
+};
 
 /* Allocate and initialise a VgStack (anonymous valgrind space).
    Protect the stack active area and the guard areas appropriately.
@@ -376,13 +382,13 @@ VgStack* VG_(am_alloc_VgStack)( /*OUT*/Addr* initial_sp )
 
    /* Allocate the stack. */
    szB = VG_STACK_GUARD_SZB 
-         + VG_STACK_ACTIVE_SZB + VG_STACK_GUARD_SZB;
+         + VG_(clo_valgrind_stacksize) + VG_STACK_GUARD_SZB;
 
    sres = VG_(am_mmap_anon_float_valgrind)( szB );
    if (sr_isError(sres))
       return NULL;
 
-   stack = (VgStack*)(AddrH)sr_Res(sres);
+   stack = (VgStack*)(Addr)sr_Res(sres);
 
    aspacem_assert(VG_IS_PAGE_ALIGNED(szB));
    aspacem_assert(VG_IS_PAGE_ALIGNED(stack));
@@ -399,12 +405,12 @@ VgStack* VG_(am_alloc_VgStack)( /*OUT*/Addr* initial_sp )
    );
 
    sres = local_do_mprotect_NO_NOTIFY( 
-             (Addr) &stack->bytes[VG_STACK_GUARD_SZB + VG_STACK_ACTIVE_SZB], 
+             (Addr) &stack->bytes[VG_STACK_GUARD_SZB + VG_(clo_valgrind_stacksize)], 
              VG_STACK_GUARD_SZB, VKI_PROT_NONE 
           );
    if (sr_isError(sres)) goto protect_failed;
    VG_(am_notify_mprotect)( 
-      (Addr) &stack->bytes[VG_STACK_GUARD_SZB + VG_STACK_ACTIVE_SZB],
+      (Addr) &stack->bytes[VG_STACK_GUARD_SZB + VG_(clo_valgrind_stacksize)],
       VG_STACK_GUARD_SZB, VKI_PROT_NONE 
    );
 
@@ -412,14 +418,15 @@ VgStack* VG_(am_alloc_VgStack)( /*OUT*/Addr* initial_sp )
       tell how much got used. */
 
    p = (UInt*)&stack->bytes[VG_STACK_GUARD_SZB];
-   for (i = 0; i < VG_STACK_ACTIVE_SZB/sizeof(UInt); i++)
+   for (i = 0; i < VG_(clo_valgrind_stacksize)/sizeof(UInt); i++)
       p[i] = 0xDEADBEEF;
 
-   *initial_sp = (Addr)&stack->bytes[VG_STACK_GUARD_SZB + VG_STACK_ACTIVE_SZB];
+   *initial_sp = (Addr)&stack->bytes[VG_STACK_GUARD_SZB + VG_(clo_valgrind_stacksize)];
    *initial_sp -= 8;
    *initial_sp &= ~((Addr)0x1F); /* 32-align it */
 
-   VG_(debugLog)( 1,"aspacem","allocated thread stack at 0x%llx size %d\n",
+   VG_(debugLog)( 1,"aspacem",
+                  "allocated valgrind thread stack at 0x%llx size %d\n",
                   (ULong)(Addr)stack, szB);
    ML_(am_do_sanity_check)();
    return stack;
@@ -436,13 +443,13 @@ VgStack* VG_(am_alloc_VgStack)( /*OUT*/Addr* initial_sp )
 /* Figure out how many bytes of the stack's active area have not
    been used.  Used for estimating if we are close to overflowing it. */
 
-SizeT VG_(am_get_VgStack_unused_szB)( VgStack* stack, SizeT limit )
+SizeT VG_(am_get_VgStack_unused_szB)( const VgStack* stack, SizeT limit )
 {
    SizeT i;
-   UInt* p;
+   const UInt* p;
 
-   p = (UInt*)&stack->bytes[VG_STACK_GUARD_SZB];
-   for (i = 0; i < VG_STACK_ACTIVE_SZB/sizeof(UInt); i++) {
+   p = (const UInt*)&stack->bytes[VG_STACK_GUARD_SZB];
+   for (i = 0; i < VG_(clo_valgrind_stacksize)/sizeof(UInt); i++) {
       if (p[i] != 0xDEADBEEF)
          break;
       if (i * sizeof(UInt) >= limit)

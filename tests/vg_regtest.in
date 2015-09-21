@@ -6,7 +6,7 @@
 #  This file is part of Valgrind, a dynamic binary instrumentation
 #  framework.
 #
-#  Copyright (C) 2003 Nicholas Nethercote
+#  Copyright (C) 2003-2013 Nicholas Nethercote
 #     njn@valgrind.org
 #
 #  This program is free software; you can redistribute it and/or
@@ -44,6 +44,9 @@
 #     This valgrind must be configured with --enable-inner.
 #   --outer-tool: tool to use by the outer valgrind (default memcheck).
 #   --outer-args: use this as outer tool args.
+#   --loop-till-fail: loops on the test(s) till one fail, then exit
+#              This is useful to obtain detailed trace or --keep-unfiltered
+#              output of a non deterministic test failure
 #
 # The easiest way is to run all tests in valgrind/ with (assuming you installed
 # in $PREFIX):
@@ -56,7 +59,9 @@
 #
 # Each test is defined in a file <test>.vgtest, containing one or more of the
 # following lines, in any order:
-#   - prog:   <prog to run>                         (compulsory)
+#   - prog:   <prog to run>
+#   - prog-asis: <prog to run>
+#   - env: <environment variable for prog>          (default: none)
 #   - args:   <args for prog>                       (default: none)
 #   - vgopts: <Valgrind options>                    (default: none;
 #                                                    multiple are allowed)
@@ -77,10 +82,15 @@
 #   - post: <post-test check command>               (default: none)
 #   - cleanup: <post-test cleanup cmd>              (default: none)
 #
+# One of prog or prog-asis must be specified.
 # If prog or probB is a relative path, it will be prefix with the test directory.
+# prog-asis will be taken as is, i.e. not prefixed with the test directory.
 # Note that filters are necessary for stderr results to filter out things that
 # always change, eg. process id numbers.
 # Note that if a progB is specified, it is started in background (before prog).
+#
+# There can be more than one env: declaration. Here is an example:
+#   env: PATH=/opt/bin:$PATH
 #
 # Expected stdout (filtered) is kept in <test>.stdout.exp* (can be more
 # than one expected output).  It can be missing if it would be empty.  Expected
@@ -126,7 +136,8 @@ use strict;
 my $usage="\n"
      . "Usage:\n"
      . "   vg_regtest [--all, --valgrind, --valgrind-lib, --keep-unfiltered\n"
-     . "                 --outer-valgrind, --outer-tool, --outer-args]\n"
+     . "                 --outer-valgrind, --outer-tool, --outer-args\n"
+     . "                 --loop-till-fail]\n"
      . "   Use EXTRA_REGTEST_OPTS to supply extra args for all tests\n"
      . "\n";
 
@@ -150,6 +161,7 @@ my $stdinB;             # Input file for progB
 my $prereq;             # prerequisite test to satisfy before running test
 my $post;               # check command after running test
 my $cleanup;            # cleanup command to run
+my @env = ();           # environment variable to set prior calling $prog
 
 my @failures;           # List of failed tests
 
@@ -170,6 +182,7 @@ my $outer_args;
 
 my $valgrind_lib = "$tests_dir/.in_place";
 my $keepunfiltered = 0;
+my $looptillfail = 0;
 
 # default filter is the one named "filter_stderr" in the test's directory
 my $default_stderr_filter = "filter_stderr";
@@ -226,6 +239,8 @@ sub process_command_line()
                 $valgrind_lib = $1;
             } elsif ($arg =~ /^--keep-unfiltered$/) {
                 $keepunfiltered = 1;
+            } elsif ($arg =~ /^--loop-till-fail$/) {
+                $looptillfail = 1;
             } else {
                 die $usage;
             }
@@ -243,6 +258,7 @@ sub process_command_line()
               . " --run-libc-freeres=no --sim-hints=enable-outer"
               . " --smc-check=all-non-file"
               . " --vgdb=no --trace-children=yes --read-var-info=no"
+              . " --read-inline-info=yes"
               . " --suppressions=" 
               . validate_program($tests_dir,"./tests/outer_inner.supp",1,0)
               . " --memcheck:leak-check=full --memcheck:show-reachable=no"
@@ -294,6 +310,8 @@ sub read_vgtest_file($)
             $vgopts = $vgopts . " " . $addvgopts;   # Nb: Make sure there's a space!
         } elsif ($line =~ /^\s*prog:\s*(.*)$/) {
             $prog = validate_program(".", $1, 0, 0);
+        } elsif ($line =~ /^\s*prog-asis:\s*(.*)$/) {
+            $prog = $1;
         } elsif ($line =~ /^\s*args:\s*(.*)$/) {
             $args = $1;
         } elsif ($line =~ /^\s*stdout_filter:\s*(.*)$/) {
@@ -324,6 +342,8 @@ sub read_vgtest_file($)
             $post = $1;
         } elsif ($line =~ /^\s*cleanup:\s*(.*)$/) {
             $cleanup = $1;
+        } elsif ($line =~ /^\s*env:\s*(.*)$/) {
+            push @env,$1;
         } else {
             die "Bad line in $f: $line\n";
         }
@@ -402,6 +422,10 @@ sub do_diffs($$$$)
     print "*** $name failed ($mid) ***\n";
     push(@failures, sprintf("%-40s ($mid)", "$fullname"));
     $num_failures{$mid}++;
+    if ($looptillfail == 1) {
+       print "Failure encountered, stopping to loop\n";
+       exit 1
+    }
 }
 
 sub do_one_test($$) 
@@ -454,13 +478,19 @@ sub do_one_test($$)
     } else {
         printf("%-16s valgrind $extraopts $vgopts $prog $args\n", "$name:");
     }
- 
+
+    # Collect environment variables, if any.
+    my $envvars = "";
+    foreach my $e (@env) {
+        $envvars = "$envvars $e";
+    }
+
     # Pass the appropriate --tool option for the directory (can be overridden
     # by an "args:" line, though).
     my $tool=determine_tool();
     if (defined $outer_valgrind ) {
         # in an outer-inner setup, only set VALGRIND_LIB_INNER
-        mysystem(   "VALGRIND_LIB_INNER=$valgrind_lib "
+        mysystem(   "$envvars VALGRIND_LIB_INNER=$valgrind_lib "
                   . "$outer_valgrind "
                   . "--tool=" . $outer_tool . " "
                   . "$outer_args "
@@ -472,7 +502,7 @@ sub do_one_test($$)
     } else {
         # Set both VALGRIND_LIB and VALGRIND_LIB_INNER in case this Valgrind
         # was configured with --enable-inner.
-        mysystem(   "VALGRIND_LIB=$valgrind_lib VALGRIND_LIB_INNER=$valgrind_lib "
+        mysystem(   "$envvars VALGRIND_LIB=$valgrind_lib VALGRIND_LIB_INNER=$valgrind_lib "
                   . "$valgrind --command-line-only=yes --memcheck:leak-check=no "
                   . "--tool=$tool $extraopts $vgopts "
                   . "$prog $args > $name.stdout.out 2> $name.stderr.out");
@@ -653,23 +683,28 @@ if ($ENV{"EXTRA_REGTEST_OPTS"}) {
 }
 
 my @fs = process_command_line();
-foreach my $f (@fs) {
-    if (-d $f) {
-        test_one_dir($f, "");
-    } else { 
-        # Allow the .vgtest suffix to be given or omitted
-        if ($f =~ /.vgtest$/ && -r $f) {
-            # do nothing
-        } elsif (-r "$f.vgtest") {
-            $f = "$f.vgtest";
-        } else {
-            die "`$f' neither a directory nor a readable test file/name\n"
+while (1) { # we will exit after one loop, unless looptillfail
+    foreach my $f (@fs) {
+        if (-d $f) {
+            test_one_dir($f, "");
+        } else { 
+            # Allow the .vgtest suffix to be given or omitted
+            if ($f =~ /.vgtest$/ && -r $f) {
+                # do nothing
+            } elsif (-r "$f.vgtest") {
+                $f = "$f.vgtest";
+            } else {
+                die "`$f' neither a directory nor a readable test file/name\n"
+            }
+            my $dir  = `dirname  $f`;   chomp $dir;
+            my $file = `basename $f`;   chomp $file;
+            chdir($dir) or die "Could not change into $dir\n";
+            do_one_test($dir, $file);
         }
-        my $dir  = `dirname  $f`;   chomp $dir;
-        my $file = `basename $f`;   chomp $file;
-        chdir($dir) or die "Could not change into $dir\n";
-        do_one_test($dir, $file);
         chdir($tests_dir);
+    }
+    if ($looptillfail == 0) {
+        last;
     }
 }
 summarise_results();

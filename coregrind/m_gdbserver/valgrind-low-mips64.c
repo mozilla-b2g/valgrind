@@ -26,7 +26,6 @@
 #include "regdef.h"
 #include "regcache.h"
 
-#include "pub_core_aspacemgr.h"
 #include "pub_core_machine.h"
 #include "pub_core_debuginfo.h"
 #include "pub_core_threadstate.h"
@@ -355,6 +354,14 @@ const char* target_xml (Bool shadow_mode)
    }  
 }
 
+static CORE_ADDR** target_get_dtv (ThreadState *tst)
+{
+   VexGuestMIPS64State* mips64 = (VexGuestMIPS64State*)&tst->arch.vex;
+   // mips64 dtv location similar to ppc64
+   return (CORE_ADDR**)((CORE_ADDR)mips64->guest_ULR 
+                        - 0x7000 - sizeof(CORE_ADDR));
+}
+
 static struct valgrind_target_ops low_target = {
    num_regs,
    regs,
@@ -363,7 +370,8 @@ static struct valgrind_target_ops low_target = {
    get_pc,
    set_pc,
    "mips64",
-   target_xml
+   target_xml,
+   target_get_dtv
 };
 
 void mips64_init_architecture (struct valgrind_target_ops *target)

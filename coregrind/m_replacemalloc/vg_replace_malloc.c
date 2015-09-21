@@ -94,7 +94,13 @@
    10190 MALLOC_STATS
    10200 MALLINFO
    10210 DEFAULT_ZONE
-   10220 ZONE_CHECK
+   10220 CREATE_ZONE
+   10230 ZONE_FROM_PTR
+   10240 ZONE_CHECK
+   10250 ZONE_REGISTER
+   10260 ZONE_UNREGISTER
+   10270 ZONE_SET_NAME
+   10280 ZONE_GET_NAME
 */
 
 /* 2 Apr 05: the Portland Group compiler, which uses cfront/ARM style
@@ -116,7 +122,8 @@
 __attribute__ ((__noreturn__))
 static inline void my_exit ( int x )
 {
-#  if defined(VGPV_arm_linux_android) || defined(VGPV_mips32_linux_android)
+#  if defined(VGPV_arm_linux_android) || defined(VGPV_mips32_linux_android) \
+      || defined(VGPV_arm64_linux_android)
    __asm__ __volatile__(".word 0xFFFFFFFF");
    while (1) {}
 #  elif defined(VGPV_x86_linux_android)
@@ -131,8 +138,10 @@ static inline void my_exit ( int x )
 /* Same problem with getpagesize. */
 static inline int my_getpagesize ( void )
 {
-#  if defined(VGPV_arm_linux_android) || defined(VGPV_x86_linux_android) \
-      || defined(VGPV_mips32_linux_android)
+#  if defined(VGPV_arm_linux_android) \
+      || defined(VGPV_x86_linux_android) \
+      || defined(VGPV_mips32_linux_android) \
+      || defined(VGPV_arm64_linux_android)
    return 4096; /* kludge - link failure on Android, for some reason */
 #  else
    extern int getpagesize (void);
@@ -202,16 +211,14 @@ static void init(void);
    to a NON SIMD call.
    The definedness of such 'unused' arguments will not be verified
    by memcheck.
-   A call to 'trigger_memcheck_error_if_undefined' allows 
+   The macro 'TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED' allows 
    memcheck to detect such errors for the otherwise unused args.
-   Apart of allowing memcheck to detect an error, the function
-   trigger_memcheck_error_if_undefined has no effect and
+   Apart of allowing memcheck to detect an error, the macro
+   TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED has no effect and
    has a minimal cost for other tools replacing malloc functions.
 */
-static inline void trigger_memcheck_error_if_undefined ( ULong x )
-{
-   if (x == 0) __asm__ __volatile__( "" ::: "memory" );
-}
+#define TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED(x) \
+   if ((ULong)x == 0) __asm__ __volatile__( "" ::: "memory" )
 
 /*---------------------- malloc ----------------------*/
 
@@ -226,7 +233,7 @@ static inline void trigger_memcheck_error_if_undefined ( ULong x )
       void* v; \
       \
       DO_INIT; \
-      trigger_memcheck_error_if_undefined((ULong)n ); \
+      TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED(n); \
       MALLOC_TRACE(#fnname "(%llu)", (ULong)n ); \
       \
       v = (void*)VALGRIND_NON_SIMD_CALL1( info.tl_##vg_replacement, n ); \
@@ -242,8 +249,8 @@ static inline void trigger_memcheck_error_if_undefined ( ULong x )
       void* v; \
       \
       DO_INIT; \
-      trigger_memcheck_error_if_undefined((ULong)(UWord) zone);	\
-      trigger_memcheck_error_if_undefined((ULong) n); \
+      TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED((UWord) zone);	\
+      TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED(n);                   \
       MALLOC_TRACE(#fnname "(%p, %llu)", zone, (ULong)n ); \
       \
       v = (void*)VALGRIND_NON_SIMD_CALL1( info.tl_##vg_replacement, n ); \
@@ -264,7 +271,7 @@ static inline void trigger_memcheck_error_if_undefined ( ULong x )
       void* v; \
       \
       DO_INIT; \
-      trigger_memcheck_error_if_undefined((ULong) n); \
+      TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED(n);           \
       MALLOC_TRACE(#fnname "(%llu)", (ULong)n );        \
       \
       v = (void*)VALGRIND_NON_SIMD_CALL1( info.tl_##vg_replacement, n ); \
@@ -444,7 +451,7 @@ static inline void trigger_memcheck_error_if_undefined ( ULong x )
    void VG_REPLACE_FUNCTION_EZU(10040,soname,fnname) (void *zone, void *p)  \
    { \
       DO_INIT; \
-      trigger_memcheck_error_if_undefined((ULong)(UWord) zone);	\
+      TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED((UWord) zone);	\
       MALLOC_TRACE(#fnname "(%p, %p)\n", zone, p ); \
       if (p == NULL)  \
          return; \
@@ -578,9 +585,9 @@ static inline void trigger_memcheck_error_if_undefined ( ULong x )
       void* v; \
       \
       DO_INIT; \
-      trigger_memcheck_error_if_undefined((ULong)(UWord) zone); \
-      trigger_memcheck_error_if_undefined((ULong) nmemb); \
-      trigger_memcheck_error_if_undefined((ULong) size); \
+      TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED((UWord) zone); \
+      TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED(nmemb); \
+      TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED(size); \
       MALLOC_TRACE("zone_calloc(%p, %llu,%llu)", zone, (ULong)nmemb, (ULong)size ); \
       \
       v = (void*)VALGRIND_NON_SIMD_CALL2( info.tl_calloc, nmemb, size ); \
@@ -709,8 +716,8 @@ static inline void trigger_memcheck_error_if_undefined ( ULong x )
       void* v; \
       \
       DO_INIT; \
-      trigger_memcheck_error_if_undefined((ULong)(UWord) zone);	\
-      trigger_memcheck_error_if_undefined((ULong) n); \
+      TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED((UWord) zone);	\
+      TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED(n); \
       MALLOC_TRACE("zone_memalign(%p, al %llu, size %llu)", \
                    zone, (ULong)alignment, (ULong)n );  \
       \
@@ -736,7 +743,7 @@ static inline void trigger_memcheck_error_if_undefined ( ULong x )
       void* v; \
       \
       DO_INIT; \
-      trigger_memcheck_error_if_undefined((ULong) n); \
+      TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED(n); \
       MALLOC_TRACE("memalign(al %llu, size %llu)", \
                    (ULong)alignment, (ULong)n ); \
       \
@@ -789,7 +796,7 @@ static inline void trigger_memcheck_error_if_undefined ( ULong x )
       static int pszB = 0; \
       if (pszB == 0) \
          pszB = my_getpagesize(); \
-      trigger_memcheck_error_if_undefined((ULong)(UWord) zone);	      \
+      TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED((UWord) zone);	      \
       return VG_REPLACE_FUNCTION_EZU(10110,VG_Z_LIBC_SONAME,memalign) \
                 ((SizeT)pszB, size); \
    }
@@ -818,8 +825,8 @@ static inline void trigger_memcheck_error_if_undefined ( ULong x )
    { \
       /* In glibc-2.2.4, 1 denotes a successful return value for \
          mallopt */ \
-      trigger_memcheck_error_if_undefined((ULong) cmd); \
-      trigger_memcheck_error_if_undefined((ULong) value); \
+      TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED(cmd); \
+      TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED(value); \
       return 1; \
    }
 
@@ -863,7 +870,7 @@ static inline void trigger_memcheck_error_if_undefined ( ULong x )
    { \
       /* 0 denotes that malloc_trim() either wasn't able \
          to do anything, or was not implemented */ \
-      trigger_memcheck_error_if_undefined((ULong) pad); \
+      TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED(pad); \
       return 0; \
    }
 
@@ -1040,8 +1047,8 @@ static size_t my_malloc_size ( void* zone, void* ptr )
    /* Implement "malloc_size" by handing the request through to the
       tool's .tl_usable_size method. */
    DO_INIT;
-   trigger_memcheck_error_if_undefined((ULong)(UWord) zone);
-   trigger_memcheck_error_if_undefined((ULong)(UWord) ptr);
+   TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED((UWord) zone);
+   TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED((UWord) ptr);
    size_t res = (size_t)VALGRIND_NON_SIMD_CALL1(
                            info.tl_malloc_usable_size, ptr);
    return res;
@@ -1081,12 +1088,24 @@ static vki_malloc_zone_t vg_default_zone = {
 
 DEFAULT_ZONE(VG_Z_LIBC_SONAME, malloc_default_zone);
 DEFAULT_ZONE(SO_SYN_MALLOC,    malloc_default_zone);
+DEFAULT_ZONE(VG_Z_LIBC_SONAME, malloc_default_purgeable_zone);
+DEFAULT_ZONE(SO_SYN_MALLOC,    malloc_default_purgeable_zone);
+
+
+#define CREATE_ZONE(soname, fnname) \
+   \
+   void *VG_REPLACE_FUNCTION_EZU(10220,soname,fnname)(size_t sz, unsigned fl); \
+   void *VG_REPLACE_FUNCTION_EZU(10220,soname,fnname)(size_t sz, unsigned fl)  \
+   { \
+      return &vg_default_zone; \
+   }
+CREATE_ZONE(VG_Z_LIBC_SONAME, malloc_create_zone);
 
 
 #define ZONE_FROM_PTR(soname, fnname) \
    \
-   void *VG_REPLACE_FUNCTION_EZU(10220,soname,fnname) ( void* ptr ); \
-   void *VG_REPLACE_FUNCTION_EZU(10220,soname,fnname) ( void* ptr )  \
+   void *VG_REPLACE_FUNCTION_EZU(10230,soname,fnname) ( void* ptr ); \
+   void *VG_REPLACE_FUNCTION_EZU(10230,soname,fnname) ( void* ptr )  \
    { \
       return &vg_default_zone; \
    }
@@ -1098,14 +1117,65 @@ ZONE_FROM_PTR(SO_SYN_MALLOC,    malloc_zone_from_ptr);
 // GrP fixme bypass libc's use of zone->introspect->check
 #define ZONE_CHECK(soname, fnname) \
    \
-   int VG_REPLACE_FUNCTION_EZU(10230,soname,fnname)(void* zone); \
-   int VG_REPLACE_FUNCTION_EZU(10230,soname,fnname)(void* zone)  \
+   int VG_REPLACE_FUNCTION_EZU(10240,soname,fnname)(void* zone); \
+   int VG_REPLACE_FUNCTION_EZU(10240,soname,fnname)(void* zone)  \
    { \
-      trigger_memcheck_error_if_undefined((ULong) zone); \
+      TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED(zone); \
+      panic(#fnname); \
       return 1; \
    }
 
-//ZONE_CHECK(VG_Z_LIBC_SONAME, malloc_zone_check);    
+ZONE_CHECK(VG_Z_LIBC_SONAME, malloc_zone_check);    
+ZONE_CHECK(SO_SYN_MALLOC,    malloc_zone_check);
+
+
+#define ZONE_REGISTER(soname, fnname) \
+   \
+   void VG_REPLACE_FUNCTION_EZU(10250,soname,fnname)(void* zone); \
+   void VG_REPLACE_FUNCTION_EZU(10250,soname,fnname)(void* zone)  \
+   { \
+      TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED(zone); \
+   }
+
+ZONE_REGISTER(VG_Z_LIBC_SONAME, malloc_zone_register);
+ZONE_REGISTER(SO_SYN_MALLOC,    malloc_zone_register);
+
+
+#define ZONE_UNREGISTER(soname, fnname) \
+   \
+   void VG_REPLACE_FUNCTION_EZU(10260,soname,fnname)(void* zone); \
+   void VG_REPLACE_FUNCTION_EZU(10260,soname,fnname)(void* zone)  \
+   { \
+      TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED(zone); \
+   }
+
+ZONE_UNREGISTER(VG_Z_LIBC_SONAME, malloc_zone_unregister);
+ZONE_UNREGISTER(SO_SYN_MALLOC,    malloc_zone_unregister);
+
+
+#define ZONE_SET_NAME(soname, fnname) \
+   \
+   void VG_REPLACE_FUNCTION_EZU(10270,soname,fnname)(void* zone, char* nm); \
+   void VG_REPLACE_FUNCTION_EZU(10270,soname,fnname)(void* zone, char* nm)  \
+   { \
+      TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED(zone); \
+   }
+
+ZONE_SET_NAME(VG_Z_LIBC_SONAME, malloc_set_zone_name);
+ZONE_SET_NAME(SO_SYN_MALLOC,    malloc_set_zone_name);
+
+
+#define ZONE_GET_NAME(soname, fnname) \
+   \
+   char* VG_REPLACE_FUNCTION_EZU(10280,soname,fnname)(void* zone); \
+   char* VG_REPLACE_FUNCTION_EZU(10280,soname,fnname)(void* zone)  \
+   { \
+      TRIGGER_MEMCHECK_ERROR_IF_UNDEFINED(zone); \
+      return vg_default_zone.zone_name; \
+   }
+
+ZONE_SET_NAME(VG_Z_LIBC_SONAME, malloc_get_zone_name);
+ZONE_SET_NAME(SO_SYN_MALLOC,    malloc_get_zone_name);
 
 #endif /* defined(VGO_darwin) */
 

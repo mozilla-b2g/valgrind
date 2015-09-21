@@ -31,9 +31,11 @@
 #ifndef __VKI_PPC64_LINUX_H
 #define __VKI_PPC64_LINUX_H
 
-// ppc64 is big-endian.
+#if defined(VGP_ppc32_linux) || defined(VGP_ppc64be_linux)
 #define VKI_BIG_ENDIAN  1
-
+#elif defined(VGP_ppc64le_linux)
+#define VKI_LITTLE_ENDIAN  1
+#endif
 //----------------------------------------------------------------------
 // From linux-2.6.13/include/asm-ppc64/types.h
 //----------------------------------------------------------------------
@@ -390,6 +392,10 @@ struct vki_sigcontext {
 #define VKI_F_SETOWN_EX		15
 #define VKI_F_GETOWN_EX		16
 
+#define VKI_F_OFD_GETLK		36
+#define VKI_F_OFD_SETLK		37
+#define VKI_F_OFD_SETLKW	38
+
 #define VKI_F_OWNER_TID		0
 #define VKI_F_OWNER_PID		1
 #define VKI_F_OWNER_PGRP	2
@@ -431,6 +437,7 @@ struct vki_f_owner_ex {
 
 #define VKI_SIOCSPGRP       0x8902
 #define VKI_SIOCGPGRP       0x8904
+#define VKI_SIOCATMARK      0x8905
 #define VKI_SIOCGSTAMP      0x8906          /* Get stamp (timeval) */
 #define VKI_SIOCGSTAMPNS    0x8907          /* Get stamp (timespec) */
 
@@ -631,6 +638,7 @@ struct vki_termios {
 #define VKI_FIONREAD        _VKI_IOR('f', 127, int)
 #define VKI_TIOCLINUX       0x541C
 #define VKI_FIONBIO         _VKI_IOW('f', 126, int)
+#define VKI_TIOCNOTTY       0x5422
 #define VKI_TCSBRKP         0x5425  /* Needed for POSIX tcsendbreak() */
 #define VKI_TIOCGPTN        _VKI_IOR('T',0x30, unsigned int) 
                             /* Get Pty Number (of pty-mux device) */
@@ -673,7 +681,7 @@ struct vki_ucontext {
   struct vki_ucontext  *uc_link;
   vki_stack_t           uc_stack;
   vki_sigset_t          uc_sigmask;
-  vki_sigset_t          __unused[15]; /* Allow for uc_sigmask growth */
+  vki_sigset_t          __unused0[15]; /* Allow for uc_sigmask growth */
   struct vki_sigcontext uc_mcontext;  /* last for extensibility */
 };
 

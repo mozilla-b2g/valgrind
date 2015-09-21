@@ -31,6 +31,7 @@
 #define __PUB_CORE_GDBSERVER_H
 
 #include "pub_tool_gdbserver.h"
+#include "pub_core_options.h"
 #include "pub_core_threadstate.h"   // VgSchedReturnCode
 
 /* Return the default path prefix for the named pipes (FIFOs) used by vgdb/gdb
@@ -43,6 +44,13 @@ HChar* VG_(vgdb_prefix_default)(void);
 // breakpoints before execution.
 // If VG_(clo_vgdb) == No, the below has no effect.
 void VG_(gdbserver_prerun_action) (ThreadId tid);
+
+// True if the initialisation of gdbserver was done,
+// i.e. VG_(gdbserver_prerun_action) was called.
+Bool VG_(gdbserver_init_done) (void);
+
+// True if gdbserver should stop execution for the specified stop at reason
+Bool VG_(gdbserver_stop_at) (VgdbStopAt stopat);
 
 // True if there is some activity from vgdb
 // If it returns True, then extern void VG_(gdbserver) can be called
@@ -92,11 +100,24 @@ Bool VG_(has_gdbserver_breakpoint) (Addr addr);
 extern void VG_(invoke_gdbserver) ( int check );
 
 // To be called by core (m_signals.c) before delivering a signal.
-// Returns True unless gdb user asks to not pass the signal to the client.
+// Returns False if gdb user asks to not pass the signal to the client.
+// Returns True if signal must be passed to the client, either because
+// no gdb is connected, or gdb instructs to pass the signal.
 // Note that if the below returns True, the signal might
 // still be ignored if this is the action desired by the
-// guest program.
-extern Bool VG_(gdbserver_report_signal) (Int signo, ThreadId tid);
+// guest program. Using GDB, the user can also modify the signal to be
+// reported (e.g. changing the signo to pass to the guest).
+// If this function returns True, m_signals.c should deliver the signal
+// info as modified by VG_(gdbserver_report_signal).
+// If this function returns False, no signal should be reported.
+extern Bool VG_(gdbserver_report_signal) (vki_siginfo_t *info, ThreadId tid);
+
+// If no gdb is connected yet, wait for a gdb to connect and report
+// this (supposedly) fatal signal.
+// If a gdb is already connected, this does nothing (as normally 
+// the signal was already reported to the already connected gdb).
+extern void VG_(gdbserver_report_fatal_signal) (const vki_siginfo_t *info,
+                                                ThreadId tid);
 
 /* Entry point invoked by scheduler.c to execute the request 
    VALGRIND_CLIENT_MONITOR_COMMAND.
@@ -134,8 +155,8 @@ extern Bool VG_(client_monitor_command) (HChar* cmd);
    gdbserver. */
 extern IRSB* VG_(instrument_for_gdbserver_if_needed)
      (IRSB* sb_in,                   /* block to be instrumented */
-      VexGuestLayout* layout,
-      VexGuestExtents* vge,
+      const VexGuestLayout* layout,
+      const VexGuestExtents* vge,
       IRType gWordTy, IRType hWordTy);
 
 /* reason for which gdbserver connection must be finished */
@@ -174,6 +195,7 @@ typedef
       // address of VG_(threads) and various sizes
       // and offset needed by vgdb.
       Addr32 threads;
+      int vg_n_threads;
       int sizeof_ThreadState;
       int offset_status;
       int offset_lwpid;
@@ -192,6 +214,7 @@ typedef
       Addr64 invoke_gdbserver;
 
       Addr64 threads;
+      int vg_n_threads;
       int sizeof_ThreadState;
       int offset_status;
       int offset_lwpid;

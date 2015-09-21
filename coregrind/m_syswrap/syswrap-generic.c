@@ -1,3 +1,4 @@
+/* -*- mode: C; c-basic-offset: 3; -*- */
 
 /*--------------------------------------------------------------------*/
 /*--- Wrappers for generic Unix system calls                       ---*/
@@ -34,7 +35,6 @@
 #include "pub_core_basics.h"
 #include "pub_core_vki.h"
 #include "pub_core_vkiscnums.h"
-#include "pub_core_libcsetjmp.h"    // to keep _threadstate.h happy
 #include "pub_core_threadstate.h"
 #include "pub_core_debuginfo.h"     // VG_(di_notify_*)
 #include "pub_core_aspacemgr.h"
@@ -60,12 +60,43 @@
 #include "pub_core_syswrap.h"
 #include "pub_core_tooliface.h"
 #include "pub_core_ume.h"
+#include "pub_core_stacks.h"
 
 #include "priv_types_n_macros.h"
 #include "priv_syswrap-generic.h"
 
 #include "config.h"
 
+
+void ML_(guess_and_register_stack) (Addr sp, ThreadState* tst)
+{
+   Bool debug = False;
+   NSegment const* seg;
+
+   /* We don't really know where the client stack is, because its
+      allocated by the client.  The best we can do is look at the
+      memory mappings and try to derive some useful information.  We
+      assume that sp starts near its highest possible value, and can
+      only go down to the start of the mmaped segment. */
+   seg = VG_(am_find_nsegment)(sp);
+   if (seg &&
+       VG_(am_is_valid_for_client)(sp, 1, VKI_PROT_READ | VKI_PROT_WRITE)) {
+      tst->client_stack_highest_byte = (Addr)VG_PGROUNDUP(sp)-1;
+      tst->client_stack_szB = tst->client_stack_highest_byte - seg->start + 1;
+
+      VG_(register_stack)(seg->start, tst->client_stack_highest_byte);
+
+      if (debug)
+	 VG_(printf)("tid %d: guessed client stack range [%#lx-%#lx]\n",
+		     tst->tid, seg->start, tst->client_stack_highest_byte);
+   } else {
+      VG_(message)(Vg_UserMsg,
+                   "!? New thread %d starts with SP(%#lx) unmapped\n",
+		   tst->tid, sp);
+      tst->client_stack_highest_byte = 0;
+      tst->client_stack_szB  = 0;
+   }
+}
 
 /* Returns True iff address range is something the client can
    plausibly mess with: all of it is either already belongs to the
@@ -155,7 +186,7 @@ static void notify_core_of_mmap(Addr a, SizeT len, UInt prot,
    d = VG_(am_notify_client_mmap)( a, len, prot, flags, fd, offset );
 
    if (d)
-      VG_(discard_translations)( (Addr64)a, (ULong)len,
+      VG_(discard_translations)( a, (ULong)len,
                                  "notify_core_of_mmap" );
 }
 
@@ -213,7 +244,7 @@ ML_(notify_core_and_tool_of_munmap) ( Addr a, SizeT len )
    VG_TRACK( die_mem_munmap, a, len );
    VG_(di_notify_munmap)( a, len );
    if (d)
-      VG_(discard_translations)( (Addr64)a, (ULong)len, 
+      VG_(discard_translations)( a, (ULong)len, 
                                  "ML_(notify_core_and_tool_of_munmap)" );
 }
 
@@ -230,7 +261,7 @@ ML_(notify_core_and_tool_of_mprotect) ( Addr a, SizeT len, Int prot )
    VG_TRACK( change_mem_mprotect, a, len, rr, ww, xx );
    VG_(di_notify_mprotect)( a, len, prot );
    if (d)
-      VG_(discard_translations)( (Addr64)a, (ULong)len, 
+      VG_(discard_translations)( a, (ULong)len, 
                                  "ML_(notify_core_and_tool_of_mprotect)" );
 }
 
@@ -297,7 +328,8 @@ SysRes do_mremap( Addr old_addr, SizeT old_len,
    old_seg = VG_(am_find_nsegment)( old_addr );
    if (old_addr < old_seg->start || old_addr+old_len-1 > old_seg->end)
       goto eINVAL;
-   if (old_seg->kind != SkAnonC && old_seg->kind != SkFileC)
+   if (old_seg->kind != SkAnonC && old_seg->kind != SkFileC &&
+       old_seg->kind != SkShmC)
       goto eINVAL;
 
    vg_assert(old_len > 0);
@@ -397,24 +429,20 @@ SysRes do_mremap( Addr old_addr, SizeT old_len,
    SSizeT needL = new_len - old_len;
 
    vg_assert(needL > 0);
-   if (needA == 0)
-      goto eINVAL; 
-      /* VG_(am_get_advisory_client_simple) interprets zero to mean
-         non-fixed, which is not what we want */
+   vg_assert(needA > 0);
+
    advised = VG_(am_get_advisory_client_simple)( needA, needL, &ok );
    if (ok) {
       /* Fixes bug #129866. */
       ok = VG_(am_covered_by_single_free_segment) ( needA, needL );
    }
    if (ok && advised == needA) {
-      ok = VG_(am_extend_map_client)( &d, old_seg, needL );
-      if (ok) {
+      const NSegment *new_seg = VG_(am_extend_map_client)( old_addr, needL );
+      if (new_seg) {
          VG_TRACK( new_mem_mmap, needA, needL, 
-                                 old_seg->hasR, 
-                                 old_seg->hasW, old_seg->hasX,
+                                 new_seg->hasR, 
+                                 new_seg->hasW, new_seg->hasX,
                                  0/*di_handle*/ );
-         if (d) 
-            VG_(discard_translations)( needA, needL, "do_remap(3)" );
          return VG_(mk_SysRes_Success)( old_addr );
       }
    }
@@ -452,10 +480,9 @@ SysRes do_mremap( Addr old_addr, SizeT old_len,
    {
    Addr  needA = old_addr + old_len;
    SizeT needL = new_len - old_len;
-   if (needA == 0) 
-      goto eINVAL;
-      /* VG_(am_get_advisory_client_simple) interprets zero to mean
-         non-fixed, which is not what we want */
+
+   vg_assert(needA > 0);
+
    advised = VG_(am_get_advisory_client_simple)( needA, needL, &ok );
    if (ok) {
       /* Fixes bug #129866. */
@@ -463,14 +490,13 @@ SysRes do_mremap( Addr old_addr, SizeT old_len,
    }
    if (!ok || advised != needA)
       goto eNOMEM;
-   ok = VG_(am_extend_map_client)( &d, old_seg, needL );
-   if (!ok)
+   const NSegment *new_seg = VG_(am_extend_map_client)( old_addr, needL );
+   if (!new_seg)
       goto eNOMEM;
    VG_TRACK( new_mem_mmap, needA, needL, 
-                           old_seg->hasR, old_seg->hasW, old_seg->hasX,
+                           new_seg->hasR, new_seg->hasW, new_seg->hasX,
                            0/*di_handle*/ );
-   if (d)
-      VG_(discard_translations)( needA, needL, "do_remap(6)" );
+
    return VG_(mk_SysRes_Success)( old_addr );
    }
    /*NOTREACHED*/ vg_assert(0);
@@ -540,8 +566,8 @@ void record_fd_close(Int fd)
          if(i->next)
             i->next->prev = i->prev;
          if(i->pathname) 
-            VG_(arena_free) (VG_AR_CORE, i->pathname);
-         VG_(arena_free) (VG_AR_CORE, i);
+            VG_(free) (i->pathname);
+         VG_(free) (i);
          fd_count--;
          break;
       }
@@ -555,7 +581,8 @@ void record_fd_close(Int fd)
    some such thing) or that we don't know the filename.  If the fd is
    already open, then we're probably doing a dup2() to an existing fd,
    so just overwrite the existing one. */
-void ML_(record_fd_open_with_given_name)(ThreadId tid, Int fd, char *pathname)
+void ML_(record_fd_open_with_given_name)(ThreadId tid, Int fd,
+                                         const HChar *pathname)
 {
    OpenFd *i;
 
@@ -566,7 +593,7 @@ void ML_(record_fd_open_with_given_name)(ThreadId tid, Int fd, char *pathname)
    i = allocated_fds;
    while (i) {
       if (i->fd == fd) {
-         if (i->pathname) VG_(arena_free)(VG_AR_CORE, i->pathname);
+         if (i->pathname) VG_(free)(i->pathname);
          break;
       }
       i = i->next;
@@ -574,7 +601,7 @@ void ML_(record_fd_open_with_given_name)(ThreadId tid, Int fd, char *pathname)
 
    /* Not already one: allocate an OpenFd */
    if (i == NULL) {
-      i = VG_(arena_malloc)(VG_AR_CORE, "syswrap.rfdowgn.1", sizeof(OpenFd));
+      i = VG_(malloc)("syswrap.rfdowgn.1", sizeof(OpenFd));
 
       i->prev = NULL;
       i->next = allocated_fds;
@@ -584,16 +611,16 @@ void ML_(record_fd_open_with_given_name)(ThreadId tid, Int fd, char *pathname)
    }
 
    i->fd = fd;
-   i->pathname = VG_(arena_strdup)(VG_AR_CORE, "syswrap.rfdowgn.2", pathname);
+   i->pathname = VG_(strdup)("syswrap.rfdowgn.2", pathname);
    i->where = (tid == -1) ? NULL : VG_(record_ExeContext)(tid, 0/*first_ip_delta*/);
 }
 
 // Record opening of an fd, and find its name.
 void ML_(record_fd_open_named)(ThreadId tid, Int fd)
 {
-   static HChar buf[VKI_PATH_MAX];
-   HChar* name;
-   if (VG_(resolve_filename)(fd, buf, VKI_PATH_MAX))
+   const HChar* buf;
+   const HChar* name;
+   if (VG_(resolve_filename)(fd, &buf))
       name = buf;
    else
       name = NULL;
@@ -643,7 +670,8 @@ void inet6_format(HChar *s, const UChar ip[16])
    static const unsigned char V4mappedprefix[12] = {0,0,0,0,0,0,0,0,0,0,0xff,0xff};
 
    if (!VG_(memcmp)(ip, V4mappedprefix, 12)) {
-      struct vki_in_addr *sin_addr = (struct vki_in_addr *)(ip + 12);
+      const struct vki_in_addr *sin_addr =
+          (const struct vki_in_addr *)(ip + 12);
       UInt addr = VG_(ntohl)(sin_addr->s_addr);
 
       VG_(sprintf)(s, "::ffff:%u.%u.%u.%u",
@@ -691,7 +719,7 @@ HChar *inet6_to_name(struct vki_sockaddr_in6 *sa, UInt len, HChar *name)
    } else if (sa->sin6_port == 0) {
       VG_(sprintf)(name, "<unbound>");
    } else {
-      char addr[128];
+      HChar addr[100];    // large enough
       inet6_format(addr, (void *)&(sa->sin6_addr));
       VG_(sprintf)(name, "[%s]:%u", addr, VG_(ntohs)(sa->sin6_port));
    }
@@ -719,8 +747,8 @@ getsockdetails(Int fd)
    if(VG_(getsockname)(fd, (struct vki_sockaddr *)&(laddr.a), &llen) != -1) {
       switch(laddr.a.sa_family) {
       case VKI_AF_INET: {
-         static char lname[32];
-         static char pname[32];
+         HChar lname[32];   // large enough
+         HChar pname[32];   // large enough
          struct vki_sockaddr_in paddr;
          Int plen = sizeof(struct vki_sockaddr_in);
 
@@ -735,8 +763,8 @@ getsockdetails(Int fd)
          return;
          }
       case VKI_AF_INET6: {
-         static char lname[128];
-         static char pname[128];
+         HChar lname[128];  // large enough
+         HChar pname[128];  // large enough
          struct vki_sockaddr_in6 paddr;
          Int plen = sizeof(struct vki_sockaddr_in6);
 
@@ -837,7 +865,7 @@ void VG_(init_preopened_fds)(void)
 // DDD: should probably use HAVE_PROC here or similar, instead.
 #if defined(VGO_linux)
    Int ret;
-   struct vki_dirent d;
+   struct vki_dirent64 d;
    SysRes f;
 
    f = VG_(open)("/proc/self/fd", VKI_O_RDONLY, 0);
@@ -846,7 +874,7 @@ void VG_(init_preopened_fds)(void)
       return;
    }
 
-   while ((ret = VG_(getdents)(sr_Res(f), &d, sizeof(d))) != 0) {
+   while ((ret = VG_(getdents64)(sr_Res(f), &d, sizeof(d))) != 0) {
       if (ret == -1)
          goto out;
 
@@ -896,7 +924,7 @@ void pre_mem_read_sendmsg ( ThreadId tid, Bool read,
    HChar *outmsg = strdupcat ( "di.syswrap.pmrs.1",
                                "sendmsg", msg, VG_AR_CORE );
    PRE_MEM_READ( outmsg, base, size );
-   VG_(arena_free) ( VG_AR_CORE, outmsg );
+   VG_(free) ( outmsg );
 }
 
 static 
@@ -909,7 +937,7 @@ void pre_mem_write_recvmsg ( ThreadId tid, Bool read,
       PRE_MEM_READ( outmsg, base, size );
    else
       PRE_MEM_WRITE( outmsg, base, size );
-   VG_(arena_free) ( VG_AR_CORE, outmsg );
+   VG_(free) ( outmsg );
 }
 
 static
@@ -927,7 +955,7 @@ void msghdr_foreachfield (
         struct vki_msghdr *msg,
         UInt length,
         void (*foreach_func)( ThreadId, Bool, const HChar *, Addr, SizeT ),
-        Bool recv
+        Bool rekv /* "recv" apparently shadows some header decl on OSX108 */
      )
 {
    HChar *fieldName;
@@ -935,7 +963,7 @@ void msghdr_foreachfield (
    if ( !msg )
       return;
 
-   fieldName = VG_(arena_malloc) ( VG_AR_CORE, "di.syswrap.mfef", VG_(strlen)(name) + 32 );
+   fieldName = VG_(malloc) ( "di.syswrap.mfef", VG_(strlen)(name) + 32 );
 
    VG_(sprintf) ( fieldName, "(%s)", name );
 
@@ -948,16 +976,18 @@ void msghdr_foreachfield (
 
    /* msg_flags is completely ignored for send_mesg, recv_mesg doesn't read
       the field, but does write to it. */
-   if ( recv )
+   if ( rekv )
       foreach_func ( tid, False, fieldName, (Addr)&msg->msg_flags, sizeof( msg->msg_flags ) );
 
-   if ( msg->msg_name ) {
+   if ( ML_(safe_to_deref)(&msg->msg_name, sizeof (void *))
+        && msg->msg_name ) {
       VG_(sprintf) ( fieldName, "(%s.msg_name)", name );
       foreach_func ( tid, False, fieldName, 
                      (Addr)msg->msg_name, msg->msg_namelen );
    }
 
-   if ( msg->msg_iov ) {
+   if ( ML_(safe_to_deref)(&msg->msg_iov, sizeof (void *))
+        && msg->msg_iov ) {
       struct vki_iovec *iov = msg->msg_iov;
       UInt i;
 
@@ -975,14 +1005,15 @@ void msghdr_foreachfield (
       }
    }
 
-   if ( msg->msg_control ) 
+   if ( ML_(safe_to_deref) (&msg->msg_control, sizeof (void *))
+        && msg->msg_control )
    {
       VG_(sprintf) ( fieldName, "(%s.msg_control)", name );
       foreach_func ( tid, False, fieldName, 
                      (Addr)msg->msg_control, msg->msg_controllen );
    }
 
-   VG_(arena_free) ( VG_AR_CORE, fieldName );
+   VG_(free) ( fieldName );
 }
 
 static void check_cmsg_for_fds(ThreadId tid, struct vki_msghdr *msg)
@@ -1018,15 +1049,18 @@ void pre_mem_read_sockaddr ( ThreadId tid,
    struct vki_sockaddr_un*  sun  = (struct vki_sockaddr_un *)sa;
    struct vki_sockaddr_in*  sin  = (struct vki_sockaddr_in *)sa;
    struct vki_sockaddr_in6* sin6 = (struct vki_sockaddr_in6 *)sa;
-#ifdef VKI_AF_BLUETOOTH
+#  ifdef VKI_AF_BLUETOOTH
    struct vki_sockaddr_rc*  rc   = (struct vki_sockaddr_rc *)sa;
-#endif
+#  endif
+#  ifdef VKI_AF_NETLINK
+   struct vki_sockaddr_nl*  nl   = (struct vki_sockaddr_nl *)sa;
+#  endif
 
    /* NULL/zero-length sockaddrs are legal */
    if ( sa == NULL || salen == 0 ) return;
 
-   outmsg = VG_(arena_malloc) ( VG_AR_CORE, "di.syswrap.pmr_sockaddr.1",
-                                VG_(strlen)( description ) + 30 );
+   outmsg = VG_(malloc) ( "di.syswrap.pmr_sockaddr.1",
+                          VG_(strlen)( description ) + 30 );
 
    VG_(sprintf) ( outmsg, description, "sa_family" );
    PRE_MEM_READ( outmsg, (Addr) &sa->sa_family, sizeof(vki_sa_family_t));
@@ -1061,22 +1095,41 @@ void pre_mem_read_sockaddr ( ThreadId tid,
             (Addr) &sin6->sin6_scope_id, sizeof (sin6->sin6_scope_id) );
          break;
 
-#ifdef VKI_AF_BLUETOOTH
+#     ifdef VKI_AF_BLUETOOTH
       case VKI_AF_BLUETOOTH:
          VG_(sprintf) ( outmsg, description, "rc_bdaddr" );
          PRE_MEM_READ( outmsg, (Addr) &rc->rc_bdaddr, sizeof (rc->rc_bdaddr) );
          VG_(sprintf) ( outmsg, description, "rc_channel" );
          PRE_MEM_READ( outmsg, (Addr) &rc->rc_channel, sizeof (rc->rc_channel) );
          break;
-#endif
+#     endif
+
+#     ifdef VKI_AF_NETLINK
+      case VKI_AF_NETLINK:
+         VG_(sprintf)(outmsg, description, "nl_pid");
+         PRE_MEM_READ(outmsg, (Addr)&nl->nl_pid, sizeof(nl->nl_pid));
+         VG_(sprintf)(outmsg, description, "nl_groups");
+         PRE_MEM_READ(outmsg, (Addr)&nl->nl_groups, sizeof(nl->nl_groups));
+         break;
+#     endif
+
+#     ifdef VKI_AF_UNSPEC
+      case VKI_AF_UNSPEC:
+         break;
+#     endif
 
       default:
-         VG_(sprintf) ( outmsg, description, "" );
-         PRE_MEM_READ( outmsg, (Addr) sa, salen );
+         /* No specific information about this address family.
+            Let's just check the full data following the family.
+            Note that this can give false positive if this (unknown)
+            struct sockaddr_???? has padding bytes between its elements. */
+         VG_(sprintf) ( outmsg, description, "sa_data" );
+         PRE_MEM_READ( outmsg, (Addr)&sa->sa_family + sizeof(sa->sa_family),
+                       salen -  sizeof(sa->sa_family));
          break;
    }
    
-   VG_(arena_free) ( VG_AR_CORE, outmsg );
+   VG_(free) ( outmsg );
 }
 
 /* Dereference a pointer to a UInt. */
@@ -1133,32 +1186,30 @@ void ML_(buf_and_len_post_check) ( ThreadId tid, SysRes res,
 /* Set the new data segment end to NEWBRK.  If this succeeds, return
    NEWBRK, else return the current data segment end. */
 
-static Addr do_brk ( Addr newbrk )
+static Addr do_brk ( Addr newbrk, ThreadId tid )
 {
    NSegment const* aseg;
-   NSegment const* rseg;
    Addr newbrkP;
    SizeT delta;
-   Bool ok;
    Bool debug = False;
 
    if (debug)
       VG_(printf)("\ndo_brk: brk_base=%#lx brk_limit=%#lx newbrk=%#lx\n",
 		  VG_(brk_base), VG_(brk_limit), newbrk);
 
-#  if 0
-   if (0) show_segments("in_brk");
-#  endif
+   if (0) VG_(am_show_nsegments)(0, "in_brk");
 
    if (newbrk < VG_(brk_base))
       /* Clearly impossible. */
       goto bad;
 
-   if (newbrk >= VG_(brk_base) && newbrk < VG_(brk_limit)) {
+   if (newbrk < VG_(brk_limit)) {
       /* shrinking the data segment.  Be lazy and don't munmap the
          excess area. */
       NSegment const * seg = VG_(am_find_nsegment)(newbrk);
-      if (seg && seg->hasT)
+      vg_assert(seg);
+
+      if (seg->hasT)
          VG_(discard_translations)( newbrk, VG_(brk_limit) - newbrk, 
                                     "do_brk(shrink)" );
       /* Since we're being lazy and not unmapping pages, we have to
@@ -1168,15 +1219,13 @@ static Addr do_brk ( Addr newbrk )
          try hard to ensure we're not going to segfault by doing the
          write - check both ends of the range are in the same segment
          and that segment is writable. */
-      if (seg) {
-         /* pre: newbrk < VG_(brk_limit) 
-              => newbrk <= VG_(brk_limit)-1 */
-         NSegment const * seg2;
-         vg_assert(newbrk < VG_(brk_limit));
-         seg2 = VG_(am_find_nsegment)( VG_(brk_limit)-1 );
-         if (seg2 && seg == seg2 && seg->hasW)
-            VG_(memset)( (void*)newbrk, 0, VG_(brk_limit) - newbrk );
-      }
+      NSegment const * seg2;
+
+      seg2 = VG_(am_find_nsegment)( VG_(brk_limit) - 1 );
+      vg_assert(seg2);
+
+      if (seg == seg2 && seg->hasW)
+         VG_(memset)( (void*)newbrk, 0, VG_(brk_limit) - newbrk );
 
       VG_(brk_limit) = newbrk;
       return newbrk;
@@ -1187,36 +1236,33 @@ static Addr do_brk ( Addr newbrk )
       aseg = VG_(am_find_nsegment)( VG_(brk_limit)-1 );
    else
       aseg = VG_(am_find_nsegment)( VG_(brk_limit) );
-   rseg = VG_(am_next_nsegment)( aseg, True/*forwards*/ );
 
    /* These should be assured by setup_client_dataseg in m_main. */
    vg_assert(aseg);
-   vg_assert(rseg);
    vg_assert(aseg->kind == SkAnonC);
-   vg_assert(rseg->kind == SkResvn);
-   vg_assert(aseg->end+1 == rseg->start);
 
-   vg_assert(newbrk >= VG_(brk_base));
-   if (newbrk <= rseg->start) {
+   if (newbrk <= aseg->end + 1) {
       /* still fits within the anon segment. */
       VG_(brk_limit) = newbrk;
       return newbrk;
    }
 
-   if (newbrk > rseg->end+1 - VKI_PAGE_SIZE) {
-      /* request is too large -- the resvn would fall below 1 page,
-         which isn't allowed. */
-      goto bad;
-   }
-
    newbrkP = VG_PGROUNDUP(newbrk);
-   vg_assert(newbrkP > rseg->start && newbrkP <= rseg->end+1 - VKI_PAGE_SIZE);
-   delta = newbrkP - rseg->start;
+   delta = newbrkP - (aseg->end + 1);
    vg_assert(delta > 0);
    vg_assert(VG_IS_PAGE_ALIGNED(delta));
    
-   ok = VG_(am_extend_into_adjacent_reservation_client)( aseg, delta );
-   if (!ok) goto bad;
+   Bool overflow;
+   if (! VG_(am_extend_into_adjacent_reservation_client)( aseg->start, delta,
+                                                          &overflow)) {
+      if (overflow)
+         VG_(umsg)("brk segment overflow in thread #%d: can't grow to %#lx\n",
+                   tid, newbrkP);
+      else
+         VG_(umsg)("Cannot map memory to grow brk segment in thread #%d "
+                   "to %#lx\n", tid, newbrkP);
+      goto bad;
+   }
 
    VG_(brk_limit) = newbrk;
    return newbrk;
@@ -1804,7 +1850,7 @@ SizeT get_shm_size ( Int shmid )
 #ifdef __NR_shmctl
 #  ifdef VKI_IPC_64
    struct vki_shmid64_ds buf;
-#    ifdef VGP_amd64_linux
+#    if defined(VGP_amd64_linux) || defined(VGP_arm64_linux)
      /* See bug 222545 comment 7 */
      SysRes __res = VG_(do_syscall3)(__NR_shmctl, shmid, 
                                      VKI_IPC_STAT, (UWord)&buf);
@@ -1891,7 +1937,7 @@ ML_(generic_POST_sys_shmat) ( ThreadId tid,
       VG_TRACK( new_mem_mmap, res, segmentSize, True, True, False,
                               0/*di_handle*/ );
       if (d)
-         VG_(discard_translations)( (Addr64)res, 
+         VG_(discard_translations)( (Addr)res, 
                                     (ULong)VG_PGROUNDUP(segmentSize),
                                     "ML_(generic_POST_sys_shmat)" );
    }
@@ -1923,7 +1969,7 @@ ML_(generic_POST_sys_shmdt) ( ThreadId tid, UWord res, UWord arg0 )
       s = NULL; /* s is now invalid */
       VG_TRACK( die_mem_munmap, s_start, s_len );
       if (d)
-         VG_(discard_translations)( (Addr64)s_start,
+         VG_(discard_translations)( s_start,
                                     (ULong)s_len,
                                     "ML_(generic_POST_sys_shmdt)" );
    }
@@ -2156,6 +2202,33 @@ ML_(generic_PRE_sys_mmap) ( ThreadId tid,
       sres = VG_(am_do_mmap_NO_NOTIFY)(advised, arg2, arg3,
                                        arg4 | VKI_MAP_FIXED,
                                        arg5, arg6);
+   }
+
+   /* Yet another refinement : sometimes valgrind chooses an address
+      which is not acceptable by the kernel. This at least happens
+      when mmap-ing huge pages, using the flag MAP_HUGETLB.
+      valgrind aspacem does not know about huge pages, and modifying
+      it to handle huge pages is not straightforward (e.g. need
+      to understand special file system mount options).
+      So, let's just redo an mmap, without giving any constraint to
+      the kernel. If that succeeds, check with aspacem that the returned
+      address is acceptable (i.e. is free).
+      This will give a similar effect as if the user would have
+      specified a MAP_FIXED at that address.
+      The aspacem state will be correctly updated afterwards.
+      We however cannot do this last refinement when the user asked
+      for a fixed mapping, as the user asked a specific address. */
+   if (sr_isError(sres) && !(arg4 & VKI_MAP_FIXED)) {
+      advised = 0; 
+      /* try mmap with NULL address and without VKI_MAP_FIXED
+         to let the kernel decide. */
+      sres = VG_(am_do_mmap_NO_NOTIFY)(advised, arg2, arg3,
+                                       arg4,
+                                       arg5, arg6);
+      if (!sr_isError(sres)) {
+         vg_assert(VG_(am_covered_by_single_free_segment)((Addr)sr_Res(sres),
+                                                           arg2));
+      }
    }
 
    if (!sr_isError(sres)) {
@@ -2679,7 +2752,7 @@ PRE(sys_execve)
    // Decide whether or not we want to follow along
    { // Make 'child_argv' be a pointer to the child's arg vector
      // (skipping the exe name)
-     HChar** child_argv = (HChar**)ARG2;
+     const HChar** child_argv = (const HChar**)ARG2;
      if (child_argv && child_argv[0] == NULL)
         child_argv = NULL;
      trace_this_child = VG_(should_we_trace_this_child)( (HChar*)ARG1, child_argv );
@@ -2801,7 +2874,6 @@ PRE(sys_execve)
       // allocate
       argv = VG_(malloc)( "di.syswrap.pre_sys_execve.1",
                           (tot_args+1) * sizeof(HChar*) );
-      if (argv == 0) goto hosed;
       // copy
       j = 0;
       argv[j++] = launcher_basename;
@@ -2930,7 +3002,7 @@ PRE(sys_brk)
    PRINT("sys_brk ( %#lx )", ARG1);
    PRE_REG_READ1(unsigned long, "brk", unsigned long, end_data_segment);
 
-   brk_new = do_brk(ARG1);
+   brk_new = do_brk(ARG1, tid);
    SET_STATUS_Success( brk_new );
 
    if (brk_new == ARG1) {
@@ -3187,7 +3259,7 @@ PRE(sys_getdents)
    *flags |= SfMayBlock;
    PRINT("sys_getdents ( %ld, %#lx, %ld )", ARG1,ARG2,ARG3);
    PRE_REG_READ3(long, "getdents",
-                 unsigned int, fd, struct linux_dirent *, dirp,
+                 unsigned int, fd, struct vki_dirent *, dirp,
                  unsigned int, count);
    PRE_MEM_WRITE( "getdents(dirp)", ARG2, ARG3 );
 }
@@ -3204,7 +3276,7 @@ PRE(sys_getdents64)
    *flags |= SfMayBlock;
    PRINT("sys_getdents64 ( %ld, %#lx, %ld )",ARG1,ARG2,ARG3);
    PRE_REG_READ3(long, "getdents64",
-                 unsigned int, fd, struct linux_dirent64 *, dirp,
+                 unsigned int, fd, struct vki_dirent64 *, dirp,
                  unsigned int, count);
    PRE_MEM_WRITE( "getdents64(dirp)", ARG2, ARG3 );
 }
@@ -3414,7 +3486,7 @@ void ML_(PRE_unknown_ioctl)(ThreadId tid, UWord request, UWord arg)
    
    UInt dir  = _VKI_IOC_DIR(request);
    UInt size = _VKI_IOC_SIZE(request);
-   if (VG_(strstr)(VG_(clo_sim_hints), "lax-ioctls") != NULL) {
+   if (SimHintiS(SimHint_lax_ioctls, VG_(clo_sim_hints))) {
       /* 
        * Be very lax about ioctl handling; the only
        * assumption is that the size is correct. Doesn't
@@ -3424,16 +3496,27 @@ void ML_(PRE_unknown_ioctl)(ThreadId tid, UWord request, UWord arg)
        * commands becomes very tiresome.
        */
    } else if (/* size == 0 || */ dir == _VKI_IOC_NONE) {
-      //VG_(message)(Vg_UserMsg, "UNKNOWN ioctl %#lx\n", request);
-      //VG_(get_and_pp_StackTrace)(tid, VG_(clo_backtrace_size));
-      static Int moans = 3;
+      static UWord unknown_ioctl[10];
+      static Int moans = sizeof(unknown_ioctl) / sizeof(unknown_ioctl[0]);
+
       if (moans > 0 && !VG_(clo_xml)) {
-         moans--;
-         VG_(umsg)("Warning: noted but unhandled ioctl 0x%lx"
-                   " with no size/direction hints\n", request); 
-         VG_(umsg)("   This could cause spurious value errors to appear.\n");
-         VG_(umsg)("   See README_MISSING_SYSCALL_OR_IOCTL for "
-                   "guidance on writing a proper wrapper.\n" );
+         /* Check if have not already moaned for this request. */
+         UInt i;
+         for (i = 0; i < sizeof(unknown_ioctl)/sizeof(unknown_ioctl[0]); i++) {
+            if (unknown_ioctl[i] == request)
+               break;
+            if (unknown_ioctl[i] == 0) {
+               unknown_ioctl[i] = request;
+               moans--;
+               VG_(umsg)("Warning: noted but unhandled ioctl 0x%lx"
+                         " with no size/direction hints.\n", request); 
+               VG_(umsg)("   This could cause spurious value errors to appear.\n");
+               VG_(umsg)("   See README_MISSING_SYSCALL_OR_IOCTL for "
+                         "guidance on writing a proper wrapper.\n" );
+               //VG_(get_and_pp_StackTrace)(tid, VG_(clo_backtrace_size));
+               return;
+            }
+         }
       }
    } else {
       //VG_(message)(Vg_UserMsg, "UNKNOWN ioctl %#lx\n", request);
@@ -3666,7 +3749,7 @@ POST(sys_munmap)
    Addr  a   = ARG1;
    SizeT len = ARG2;
 
-   ML_(notify_core_and_tool_of_munmap)( (Addr64)a, (ULong)len );
+   ML_(notify_core_and_tool_of_munmap)( a, len );
 }
 
 PRE(sys_mincore)
@@ -3721,7 +3804,7 @@ PRE(sys_open)
       fake file we cooked up at startup (in m_main).  Also, seek the
       cloned fd back to the start. */
    {
-      HChar  name[30];
+      HChar  name[30];   // large enough
       HChar* arg1s = (HChar*) ARG1;
       SysRes sres;
 
@@ -3746,7 +3829,7 @@ PRE(sys_open)
       fake file we cooked up at startup (in m_main).  Also, seek the
       cloned fd back to the start. */
    {
-      HChar  name[30];
+      HChar  name[30];   // large enough
       HChar* arg1s = (HChar*) ARG1;
       SysRes sres;
 
@@ -3813,7 +3896,7 @@ PRE(sys_write)
       --sim-hints=enable-outer (used for self hosting). */
    ok = ML_(fd_allowed)(ARG1, "write", tid, False);
    if (!ok && ARG1 == 2/*stderr*/ 
-           && VG_(strstr)(VG_(clo_sim_hints),"enable-outer"))
+           && SimHintiS(SimHint_enable_outer, VG_(clo_sim_hints)))
       ok = True;
    if (!ok)
       SET_STATUS_Failure( VKI_EBADF );
@@ -3894,7 +3977,7 @@ PRE(sys_readlink)
        * Handle the case where readlink is looking at /proc/self/exe or
        * /proc/<pid>/exe.
        */
-      HChar name[25];
+      HChar  name[30];   // large enough
       HChar* arg1s = (HChar*) ARG1;
       VG_(sprintf)(name, "/proc/%d/exe", VG_(getpid)());
       if (ML_(safe_to_deref)(arg1s, 1) &&
@@ -3928,7 +4011,8 @@ PRE(sys_readv)
    if (!ML_(fd_allowed)(ARG1, "readv", tid, False)) {
       SET_STATUS_Failure( VKI_EBADF );
    } else {
-      PRE_MEM_READ( "readv(vector)", ARG2, ARG3 * sizeof(struct vki_iovec) );
+      if ((Int)ARG3 >= 0)
+         PRE_MEM_READ( "readv(vector)", ARG2, ARG3 * sizeof(struct vki_iovec) );
 
       if (ARG2 != 0) {
          /* ToDo: don't do any of the following if the vector is invalid */
@@ -4049,8 +4133,12 @@ PRE(sys_setrlimit)
    arg1 &= ~_RLIMIT_POSIX_FLAG;
 #endif
 
-   if (ARG2 &&
-       ((struct vki_rlimit *)ARG2)->rlim_cur > ((struct vki_rlimit *)ARG2)->rlim_max) {
+   if (!VG_(am_is_valid_for_client)(ARG2, sizeof(struct vki_rlimit), 
+                                    VKI_PROT_READ)) {
+      SET_STATUS_Failure( VKI_EFAULT );
+   }
+   else if (((struct vki_rlimit *)ARG2)->rlim_cur 
+            > ((struct vki_rlimit *)ARG2)->rlim_max) {
       SET_STATUS_Failure( VKI_EINVAL );
    }
    else if (arg1 == VKI_RLIMIT_NOFILE) {
@@ -4094,6 +4182,7 @@ PRE(sys_setuid)
 
 PRE(sys_newstat)
 {
+   FUSE_COMPATIBLE_MAY_BLOCK();
    PRINT("sys_newstat ( %#lx(%s), %#lx )", ARG1,(char*)ARG1,ARG2);
    PRE_REG_READ2(long, "stat", char *, file_name, struct stat *, buf);
    PRE_MEM_RASCIIZ( "stat(file_name)", ARG1 );
@@ -4107,6 +4196,7 @@ POST(sys_newstat)
 
 PRE(sys_statfs)
 {
+   FUSE_COMPATIBLE_MAY_BLOCK();
    PRINT("sys_statfs ( %#lx(%s), %#lx )",ARG1,(char*)ARG1,ARG2);
    PRE_REG_READ2(long, "statfs", const char *, path, struct statfs *, buf);
    PRE_MEM_RASCIIZ( "statfs(path)", ARG1 );
@@ -4251,8 +4341,9 @@ PRE(sys_writev)
    if (!ML_(fd_allowed)(ARG1, "writev", tid, False)) {
       SET_STATUS_Failure( VKI_EBADF );
    } else {
-      PRE_MEM_READ( "writev(vector)", 
-		     ARG2, ARG3 * sizeof(struct vki_iovec) );
+      if ((Int)ARG3 >= 0)
+         PRE_MEM_READ( "writev(vector)", 
+                       ARG2, ARG3 * sizeof(struct vki_iovec) );
       if (ARG2 != 0) {
          /* ToDo: don't do any of the following if the vector is invalid */
          vec = (struct vki_iovec *)ARG2;
